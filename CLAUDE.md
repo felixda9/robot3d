@@ -519,6 +519,17 @@ web/                    Vite + TypeScript + three.js frontend
   - Runs from before the clock load with gait_frequency 0 (34 observations,
     same rewards); checked: trot_rsl and walk_cpu_fixed evaluate to exactly
     their cached returns.
+- **2026-09-25: `trot_clock` result** (our PPO + gait clock, 50M steps,
+  ~16 min): 19/19 checkpoints from 5M steps on walk without falls, return
+  rising steadily. At 50M: 0.40 m/s, feet down 59% (schedule: 60%),
+  exactly 2.0 steps per foot per second, diagonal sync 0.98, contact
+  matches the schedule 98.5% of the time, feet lift 5–6 cm (above the
+  4 cm the clearance reward pays for), slip −0.009 per step.
+  - vs trot_ppo (no clock): same speed, but quicker, shorter steps
+    (2.0 vs 1.3 per second, ~20 vs ~30 cm per cycle), higher lifts, and
+    twice the motor power (~25 vs ~12 W). A lower gait_frequency (e.g.
+    1.5 Hz: ~27 cm) would give longer strides with the clock.
+  - The user watches both and picks the default (currently: clock on).
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -530,9 +541,11 @@ web/                    Vite + TypeScript + three.js frontend
 - The user's gait feedback (both walkers ran) led to the trot-walk task, gait
   numbers in evaluations, RSL-RL as a reference trainer, and a gait clock
   (see Decisions, 2026-09-25).
-- `trot_ppo` (no clock) already walks: 0.39 m/s, a trot-walk. `trot_clock`
-  (our PPO + gait clock, 50M steps) is training; next: compare the two in
-  the viewer, then the user decides which becomes the default.
+- Two walkers, both trained on the GPU in ~16 min with our PPO, both
+  0.4 m/s trot-walks without falls: `trot_ppo` (no clock: longer, calmer
+  strides) and `trot_clock` (gait clock: 2 steps/s, higher lifts).
+  **Waiting for the user to watch both and pick the default gait** (and
+  possibly the clock's frequency).
 - `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
   - 0 KL spikes (walk_10m: 114, max 50.5);
   - steady 1.0–1.28 m/s after 3M steps;
