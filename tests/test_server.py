@@ -176,14 +176,12 @@ def test_policy_drives_and_can_be_switched_off(tiny_run):
 
 
 def test_dashboard_api(tiny_run):
-    import time
-
     with TestClient(create_app("quadruped", runs_dir=tiny_run.parent)) as client:
         runs = client.get("/api/runs").json()
         assert [r["name"] for r in runs] == ["tiny"] and runs[0]["status"] == "finished"
 
         detail = client.get("/api/runs/tiny").json()
-        assert len(detail["checkpoints"]) >= 2 and detail["evaluating"] == 0
+        assert len(detail["checkpoints"]) >= 2 and detail["evaluating"] == 0 and detail["evaluation_error"] == ""
         for checkpoint in detail["checkpoints"]:
             assert checkpoint["evaluation"] is None or checkpoint["evaluation"]["episodes"] > 0
 
@@ -217,6 +215,35 @@ def test_load_policy_over_websocket(tiny_run):
             assert "no checkpoint" in receive_until(ws, "error").message
             ws.send_json({"type": "load_policy", "run": "../tiny", "checkpoint": first})
             assert receive_until(ws, "error").message.startswith("invalid message")
+
+
+def test_run_from_newer_code_explains_itself(tiny_run, tmp_path):
+    """A server started before a code update can't read runs the new code
+    trained. Watch and Evaluate must say so, not fail silently."""
+    import json
+    import shutil
+
+    run_dir = tmp_path / "future"
+    shutil.copytree(tiny_run, run_dir)
+    for cached in run_dir.glob("checkpoints/*_eval.json"):
+        cached.unlink()
+    info = json.loads((run_dir / "run.json").read_text())
+    info["walk_config"]["some_new_setting"] = 1.0
+    (run_dir / "run.json").write_text(json.dumps(info))
+
+    with TestClient(create_app("quadruped", runs_dir=tmp_path)) as client:
+        assert client.post("/api/runs/future/evaluate").json()["queued"] >= 2
+        deadline = time.time() + 30
+        while client.get("/api/runs/future").json()["evaluating"] > 0 and time.time() < deadline:
+            time.sleep(0.1)
+        error = client.get("/api/runs/future").json()["evaluation_error"]
+        assert "some_new_setting" in error and "restart" in error
+
+        with client.websocket_connect("/ws") as ws:
+            first = client.get("/api/runs/future").json()["checkpoints"][0]["name"]
+            ws.send_json({"type": "load_policy", "run": "future", "checkpoint": first})
+            message = receive_until(ws, "error").message
+            assert "some_new_setting" in message and "restart" in message
 
 
 def test_root_page_responds(client):

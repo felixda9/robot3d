@@ -103,6 +103,7 @@ class EvaluationQueue:
         self.episodes = episodes
         self._queue: queue.SimpleQueue[Checkpoint | None] = queue.SimpleQueue()
         self._pending: dict[str, set[str]] = defaultdict(set)  # run name -> checkpoint names
+        self._errors: dict[str, str] = {}  # run name -> why its last failed evaluation failed
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
@@ -110,6 +111,7 @@ class EvaluationQueue:
         """Queue every checkpoint of the run that has no evaluation yet."""
         queued = 0
         with self._lock:
+            self._errors.pop(run_dir.name, None)  # a new attempt
             pending = self._pending[run_dir.name]
             for checkpoint in list_checkpoints(run_dir):
                 if checkpoint.name not in pending and checkpoint.evaluation() is None:
@@ -125,6 +127,10 @@ class EvaluationQueue:
         with self._lock:
             return len(self._pending[run_name])
 
+    def error(self, run_name: str) -> str:
+        with self._lock:
+            return self._errors.get(run_name, "")
+
     def stop(self) -> None:
         self._queue.put(None)
 
@@ -134,8 +140,10 @@ class EvaluationQueue:
         while (checkpoint := self._queue.get()) is not None:
             try:
                 save_evaluation(checkpoint, evaluate(checkpoint, episodes=self.episodes))
-            except Exception:
+            except Exception as e:
                 log.exception("evaluating %s failed", checkpoint.label)
+                with self._lock:  # shown in the dashboard, not only in this log
+                    self._errors[checkpoint.run_dir.name] = f"{checkpoint.name}: {e}"
             finally:
                 with self._lock:
                     self._pending[checkpoint.run_dir.name].discard(checkpoint.name)
@@ -358,7 +366,11 @@ def create_app(
     @app.get("/api/runs/{run}")
     def api_run(run: str) -> RunDetail:
         run_dir = _run_dir(run)
-        return run_detail(run_dir, evaluating=evaluations.pending(run_dir.name))
+        return run_detail(
+            run_dir,
+            evaluating=evaluations.pending(run_dir.name),
+            evaluation_error=evaluations.error(run_dir.name),
+        )
 
     @app.get("/api/runs/{run}/scalars")
     def api_scalars(run: str, tags: str) -> ScalarsResponse:

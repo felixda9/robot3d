@@ -74,8 +74,30 @@ const CURVES: CurveChart[] = [
   },
 ];
 
-// Reward terms of the selected run, one line per term (fixed order = fixed colors).
-const REWARD_TERMS = ["forward", "upright", "energy", "smoothness", "slip", "fall"];
+// Reward terms of the selected run, one line per term (fixed order = fixed
+// colors), split in two charts so neither has more than 8 lines. Runs only
+// log the terms their task has (e.g. old runs: no tracking/trot/air_time).
+interface TermChart extends ChartOptions {
+  terms: string[];
+}
+
+const TERM_CHARTS: TermChart[] = [
+  {
+    terms: ["tracking", "forward", "upright", "gait", "clearance", "trot", "air_time"],
+    title: "Rewards (+)",
+    subtitle: "What the selected run is rewarded for, average per step.",
+    format: fixed(3),
+    tickFormat: fixed(2),
+  },
+  {
+    terms: ["energy", "smoothness", "slip", "support", "fall"],
+    title: "Penalties (−)",
+    subtitle: "What the selected run is penalized for, average per step. Closer to 0 is better.",
+    format: fixed(3),
+    tickFormat: fixed(2),
+  },
+];
+const REWARD_TERMS = TERM_CHARTS.flatMap((c) => c.terms);
 
 export interface DashboardOptions {
   /** Replay a checkpoint in the simulator. */
@@ -87,7 +109,7 @@ export class Dashboard {
   private readonly runList: HTMLElement;
   private readonly detail: HTMLElement;
   private readonly charts = new Map<string, LineChart>();
-  private readonly termsChart: LineChart;
+  private readonly termCharts: LineChart[];
 
   private runs: RunSummary[] = [];
   /** Checked runs -> their color slot (1..8). A run keeps its color while checked. */
@@ -118,12 +140,7 @@ export class Dashboard {
     this.detail = root.querySelector(".run-detail")!;
     const grid = root.querySelector<HTMLElement>(".charts")!;
     for (const curve of CURVES) this.charts.set(curve.tag, new LineChart(grid, curve));
-    this.termsChart = new LineChart(grid, {
-      title: "Reward terms",
-      subtitle: "What the selected run is rewarded (+) or penalized (−) for, average per step.",
-      format: fixed(3),
-      tickFormat: fixed(2),
-    });
+    this.termCharts = TERM_CHARTS.map((c) => new LineChart(grid, c));
   }
 
   show(): void {
@@ -287,15 +304,16 @@ export class Dashboard {
       this.charts.get(curve.tag)!.setSeries(series);
     }
     const terms = this.selected ? this.curves.get(this.selected) : undefined;
-    this.termsChart.setSeries(
-      REWARD_TERMS.flatMap((term, i) => {
-        const s = terms?.get(`reward/${term}`);
-        return s ? [toSeries(term, term, i + 1, s)] : [];
-      }),
-    );
-    this.termsChart.element.querySelector("h3")!.textContent = this.selected
-      ? `Reward terms: ${this.selected}`
-      : "Reward terms";
+    TERM_CHARTS.forEach((c, i) => {
+      const chart = this.termCharts[i];
+      chart.setSeries(
+        c.terms.flatMap((term, slot) => {
+          const s = terms?.get(`reward/${term}`);
+          return s ? [toSeries(term, term, slot + 1, s)] : [];
+        }),
+      );
+      chart.element.querySelector("h3")!.textContent = this.selected ? `${c.title}: ${this.selected}` : c.title;
+    });
   }
 
   private renderDetail(): void {
@@ -379,16 +397,36 @@ export class Dashboard {
     });
     const note = document.createElement("p");
     note.className = "hint";
-    note.textContent = "Measured headless without exploration noise, 5 episodes each. The newest checkpoint isn't always the best.";
+    note.textContent =
+      "Measured headless without exploration noise, 5 episodes each. The newest checkpoint isn't always the best. " +
+      "Gait: a walk keeps each foot down more than half the time and never has all four in the air.";
     head.append(h, button);
     wrap.append(head, note);
+    if (d.evaluation_error) {
+      const error = document.createElement("div");
+      error.className = "dash-error";
+      error.textContent = `Evaluation failed: ${d.evaluation_error}`;
+      wrap.append(error);
+    }
 
     const table = document.createElement("table");
     table.className = "data-table";
     const header = table.createTHead().insertRow();
-    for (const label of ["Checkpoint", "Speed", "Distance", "Falls", "Mean return", ""]) {
+    for (const [label, help] of [
+      ["Checkpoint", ""],
+      ["Speed", "Average forward speed"],
+      ["Distance", "Meters walked forward per episode"],
+      ["Falls", "Episodes that ended with the robot falling over"],
+      ["Mean return", "Total reward per episode"],
+      ["Feet down", "Share of time each foot is on the ground (duty factor). Walk: over 50%, run: under 50%"],
+      ["Airborne", "Share of time all four feet are in the air. A walk: 0%"],
+      ["Trot sync", "Share of time diagonal feet (front-left + rear-right, front-right + rear-left) move together"],
+      ["Steps/s", "Touchdowns per foot per second (cadence)"],
+      ["", ""],
+    ]) {
       const th = document.createElement("th");
       th.textContent = label;
+      if (help) th.title = help;
       header.append(th);
     }
     const body = table.createTBody();
@@ -409,13 +447,20 @@ export class Dashboard {
       row.insertCell().textContent = e ? `${e.distance.toFixed(1)} m` : "–";
       row.insertCell().textContent = e ? `${e.falls}/${e.episodes}` : "–";
       row.insertCell().textContent = e ? e.mean_return.toFixed(0) : "–";
+      row.insertCell().textContent = percent(e?.duty_factor);
+      row.insertCell().textContent = percent(e?.airborne);
+      row.insertCell().textContent = percent(e?.diagonal_sync);
+      row.insertCell().textContent = e?.cadence != null ? e.cadence.toFixed(1) : "–";
       const watch = document.createElement("button");
       watch.textContent = "Watch";
       watch.title = "Replay this checkpoint in the simulator";
       watch.addEventListener("click", () => this.onWatch(d.summary.name, c.name));
       row.insertCell().append(watch);
     }
-    wrap.append(table);
+    const scroll = document.createElement("div");
+    scroll.className = "table-wrap";
+    scroll.append(table);
+    wrap.append(scroll);
     return wrap;
   }
 }
@@ -425,6 +470,11 @@ export class Dashboard {
 /** Table precision: "10.01M" vs "10.00M" (formatSteps would show both as "10M"). */
 function preciseSteps(steps: number): string {
   return steps >= 1e6 ? `${(steps / 1e6).toFixed(2)}M` : formatSteps(steps);
+}
+
+/** Gait numbers are missing (null) in evaluations saved before they existed. */
+function percent(v: number | null | undefined): string {
+  return v == null ? "–" : `${(v * 100).toFixed(0)}%`;
 }
 
 function toSeries(key: string, label: string, slot: number, s: ScalarSeries): ChartSeries {

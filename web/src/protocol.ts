@@ -262,6 +262,14 @@ export interface EvaluationInfo {
   falls: number;
   /** Mean total reward per episode. */
   mean_return: number;
+  /** Gait (null in evaluations saved before these existed): share of time each foot is on the ground (walk > 0.5, run < 0.5). */
+  duty_factor: number | null;
+  /** Share of time all feet are in the air (a walk: 0). */
+  airborne: number | null;
+  /** Share of time diagonal feet are both down or both up (trot: ~1). */
+  diagonal_sync: number | null;
+  /** Touchdowns per foot per second. */
+  cadence: number | null;
 }
 
 export interface CheckpointInfo {
@@ -285,6 +293,8 @@ export interface RunDetail {
   settings: SettingInfo[];
   /** Checkpoints of this run waiting for or in evaluation. */
   evaluating: number;
+  /** Why the last evaluation of this run failed, "" if none did (cleared when evaluation is requested again). */
+  evaluation_error: string;
 }
 
 /** One TensorBoard curve: value at each logged training step. */

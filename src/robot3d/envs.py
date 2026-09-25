@@ -38,6 +38,9 @@ class WalkEnv(gym.Env):
         self._last_action = np.zeros(n)
         self._steps = 0
         self._start_x = 0.0
+        nfeet = len(self.task.feet)
+        self._feet_down = np.ones(nfeet, dtype=bool)  # per foot: on the ground at the last step?
+        self._air_time = np.zeros(nfeet)  # per foot: seconds in the air so far
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)  # seeds self.np_random
@@ -45,14 +48,16 @@ class WalkEnv(gym.Env):
         self._last_action = np.zeros(self.task.num_actions)
         self._steps = 0
         self._start_x = float(self.data.qpos[0])
-        return self.task.observation(self.data, self._last_action), {}
+        self._feet_down = self.task.feet_state(self.data)[1]
+        self._air_time = np.zeros(len(self.task.feet))
+        return self.task.observation(self.data, self._last_action, self.task.gait_phase(0)), {}
 
     def step(self, action):
         task, model, data = self.task, self.model, self.data
         action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         data.ctrl[:] = task.action_to_ctrl(action)
 
-        x_before = data.qpos[0]
+        x_before, y_before = data.qpos[0], data.qpos[1]
         feet_before = task.feet_state(data)
         power = 0.0
         for _ in range(task.decimation):
@@ -63,15 +68,25 @@ class WalkEnv(gym.Env):
         power /= task.decimation
         # Average speed over the step (smoother than the instantaneous velocity).
         forward_velocity = (data.qpos[0] - x_before) / task.control_dt
-        foot_slip = task.foot_slip(feet_before, task.feet_state(data))
+        lateral_velocity = (data.qpos[1] - y_before) / task.control_dt
+        feet_after = task.feet_state(data)
+        foot_slip = task.foot_slip(feet_before, feet_after)
+        feet_down = feet_after[1]
+        landed, air_time, self._air_time = task.air_time_update(self._feet_down, self._air_time, feet_down)
+        self._feet_down = feet_down
 
         up_z = task.up_z(data)
         fell = task.fell(data)
-        reward, terms = task.reward(forward_velocity, power, action, self._last_action, up_z, fell, foot_slip)
+        reward, terms = task.reward(
+            vx=forward_velocity, vy=lateral_velocity, motor_power=power, action=action,
+            last_action=self._last_action, up_z=up_z, fell=fell, foot_slip=foot_slip,
+            feet_down=feet_down, landed=landed, air_time=air_time,
+            foot_height=task.foot_heights(data), phase=task.gait_phase(self._steps + 1),  # the clock after this step
+        )
         self._last_action = action
         self._steps += 1
 
-        observation = task.observation(data, self._last_action)
+        observation = task.observation(data, self._last_action, task.gait_phase(self._steps))
         terminated = fell
         truncated = self._steps >= task.max_steps
         info = {

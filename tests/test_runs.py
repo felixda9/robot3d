@@ -59,6 +59,13 @@ def test_evaluation_cache(tiny_run):
     info = save_evaluation(checkpoint, results)
     assert (info.episodes, info.distance, info.falls, info.mean_return) == (2, 2.0, 1, 20.0)
     assert checkpoint.evaluation() == info
+    assert info.duty_factor is None  # results without gait numbers (older evaluations)
+
+    results[0] |= {"duty_factor": 0.6, "airborne": 0.0, "diagonal_sync": 0.9, "cadence": 2.0}
+    results[1] |= {"duty_factor": None, "airborne": None, "diagonal_sync": None, "cadence": None}
+    info = save_evaluation(checkpoint, results)
+    assert (info.duty_factor, info.airborne, info.diagonal_sync, info.cadence) == (0.6, 0.0, 0.9, 2.0)
+    assert checkpoint.evaluation() == info
     checkpoint.eval_path.unlink()
     assert checkpoint.evaluation() is None
 

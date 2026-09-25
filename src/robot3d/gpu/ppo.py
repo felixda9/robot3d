@@ -18,9 +18,7 @@ Imports only PyTorch (not Warp), so the web server can load its checkpoints.
 """
 
 import math
-import sys
 import time
-from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -29,6 +27,7 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
+from robot3d.gpu.common import RolloutLog, start_run
 from robot3d.runs import RUNS_DIR, default_run_name, now_iso, write_run_info
 from robot3d.walk import WalkConfig
 
@@ -168,6 +167,16 @@ class TorchPolicy:
 
     def __init__(self, path: Path):
         saved = torch.load(path, map_location="cpu", weights_only=True)
+        self._jit = None
+        if saved.get("format") == "robot3d-jit-v1":
+            # An RSL-RL actor exported as TorchScript (gpu/rsl.py): it
+            # normalizes internally and returns the noise-free action.
+            import io
+
+            self.num_obs = int(saved["num_obs"])
+            self._jit = torch.jit.load(io.BytesIO(saved["jit"]), map_location="cpu")
+            self._jit.eval()
+            return
         if saved.get("format") != CHECKPOINT_FORMAT:
             raise ValueError(f"{path} is not a {CHECKPOINT_FORMAT} checkpoint")
         self.num_obs = int(saved["num_obs"])
@@ -180,6 +189,8 @@ class TorchPolicy:
     @torch.no_grad()
     def act(self, observation: np.ndarray) -> np.ndarray:
         obs = torch.as_tensor(observation, dtype=torch.float32).unsqueeze(0)
+        if self._jit is not None:
+            return self._jit(obs)[0].numpy().astype(np.float64)
         return self.net.actor(self.normalizer(obs))[0].numpy().astype(np.float64)
 
 
@@ -209,23 +220,10 @@ def train_gpu(
     torch.manual_seed(seed)
     name = name or default_run_name(robot, "walk_gpu")
     run_dir = runs_dir / name
-    if run_dir.exists():
-        raise FileExistsError(f"Run folder already exists: {run_dir}")
-    (run_dir / "checkpoints").mkdir(parents=True)
-    run_info = {
-        "robot": robot,
-        "task": "walk",
-        "backend": "gpu",
-        "device": torch.cuda.get_device_name(device) if torch.cuda.is_available() else device,
-        "started": now_iso(),
-        "command": " ".join(sys.argv),
-        "total_steps": total_steps,
-        "n_envs": ppo.num_envs,
-        "seed": seed,
-        "walk_config": walk.to_dict(),
-        "ppo_config": asdict(ppo),
-    }
-    write_run_info(run_dir, run_info)
+    run_info = start_run(
+        run_dir, robot=robot, trainer="robot3d-ppo", total_steps=total_steps, n_envs=ppo.num_envs,
+        seed=seed, walk=walk, trainer_config=asdict(ppo), device=device,
+    )
 
     env = GpuWalkEnv(ppo.num_envs, robot, walk, device=device, seed=seed)
     dev = env.device
@@ -263,8 +261,7 @@ def train_gpu(
     buf_rew = torch.zeros((T, N), device=dev)
     buf_done = torch.zeros((T, N), device=dev)
 
-    recent_returns: deque[float] = deque(maxlen=100)  # like SB3's ep_info_buffer
-    recent_lengths: deque[float] = deque(maxlen=100)
+    rollout_log = RolloutLog(env.task.control_dt)
     obs = env.reset()
     normalizer.update(obs)
     steps = 0
@@ -277,8 +274,6 @@ def train_gpu(
         while steps < total_steps:
             iteration += 1
             # ------------------------------------------------ collect a rollout
-            term_sums = {k: 0.0 for k in ("forward", "upright", "energy", "smoothness", "slip", "fall")}
-            ep_distance, ep_speed, ep_fell = [], [], []
             with torch.no_grad():
                 for t in range(T):
                     nobs = normalizer(obs)
@@ -297,15 +292,7 @@ def train_gpu(
                     buf_done[t] = result.done.float()
                     obs = result.obs
                     normalizer.update(obs)
-                    for k, v in result.terms.items():
-                        term_sums[k] += float(v.mean())
-                    if result.done.any():
-                        recent_returns.extend(result.episode_return.tolist())
-                        recent_lengths.extend(result.episode_length.tolist())
-                        seconds = result.episode_length.float() * env.task.control_dt
-                        ep_distance.extend(result.episode_distance.tolist())
-                        ep_speed.extend((result.episode_distance / seconds).tolist())
-                        ep_fell.extend(result.episode_fell.float().tolist())
+                    rollout_log.record(result)
                 last_value = net.value(normalizer(obs))
 
                 # GAE: how much better than expected each action turned out.
@@ -376,7 +363,13 @@ def train_gpu(
 
                     optimizer.zero_grad()
                     loss.backward()
-                    nn.utils.clip_grad_norm_(net.parameters(), ppo.max_grad_norm)
+                    # Clip the policy's and the critic's gradients separately
+                    # (as RSL-RL does). Clipped together, the critic's large
+                    # gradients (value errors are in reward units, ~100)
+                    # dominate the shared norm, so every policy update got
+                    # shrunk by an arbitrary, fluctuating factor.
+                    nn.utils.clip_grad_norm_([*net.actor.parameters(), net.log_std], ppo.max_grad_norm)
+                    nn.utils.clip_grad_norm_(net.critic.parameters(), ppo.max_grad_norm)
                     optimizer.step()
 
                     with torch.no_grad():
@@ -407,15 +400,8 @@ def train_gpu(
                 "train/update_fraction": len(stats["pg"]) / (ppo.epochs * ppo.minibatches),
                 "train/explained_variance": float(explained_var),
                 "train/std": float(net.log_std.detach().exp().mean()),
-                **{f"reward/{k}": v / T for k, v in term_sums.items()},
+                **rollout_log.scalars(),
             }
-            if recent_returns:
-                scalars["rollout/ep_rew_mean"] = np.mean(recent_returns)
-                scalars["rollout/ep_len_mean"] = np.mean(recent_lengths)
-            if ep_distance:
-                scalars["episode/distance_m"] = np.mean(ep_distance)
-                scalars["episode/speed_mps"] = np.mean(ep_speed)
-                scalars["episode/fell"] = np.mean(ep_fell)
             for tag, value in scalars.items():
                 writer.add_scalar(tag, float(value), steps)
             writer.flush()

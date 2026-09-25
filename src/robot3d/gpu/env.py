@@ -103,7 +103,10 @@ class GpuWalkEnv:
         self.episode_length = torch.zeros(num_envs, dtype=torch.long, device=self.device)
         self.episode_return = torch.zeros(num_envs, device=self.device)
         self.start_x = torch.zeros(num_envs, device=self.device)
+        # Foot x/y and on-ground at the end of the last step (for slip, and
+        # as "was down" for landings), and each foot's time in the air.
         self._feet_before: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.air_time = torch.zeros((num_envs, len(self.task.feet)), device=self.device)
         self._graph = None
 
     # -------------------------------------------------------------- stepping
@@ -162,25 +165,34 @@ class GpuWalkEnv:
         return self.observe()
 
     def observe(self) -> torch.Tensor:
-        return self.task.observation(self.qpos, self.qvel, self.xmat[:, 1], self.last_action)
+        phase = self.task.gait_phase(self.episode_length)
+        return self.task.observation(self.qpos, self.qvel, self.xmat[:, 1], self.last_action, phase)
 
     def step(self, actions: torch.Tensor) -> StepResult:
         task = self.task
         actions = actions.clamp(-1.0, 1.0)
         self.ctrl.copy_(task.action_to_ctrl(actions))
         x_before = self.qpos[:, 0].clone()
+        y_before = self.qpos[:, 1].clone()
         self.power.zero_()
 
         self._run_physics()
 
         power = self.power / task.decimation
-        forward_velocity = (self.qpos[:, 0] - x_before) / task.control_dt
+        vx = (self.qpos[:, 0] - x_before) / task.control_dt
+        vy = (self.qpos[:, 1] - y_before) / task.control_dt
         feet_after = task.feet_state(self.geom_xpos)
         foot_slip = task.foot_slip(self._feet_before, feet_after)
+        feet_down = feet_after[1]
+        landed, air_at_landing, self.air_time = task.air_time_update(self._feet_before[1], self.air_time, feet_down)
         torso_rot = self.xmat[:, 1]
         fell = task.fell(self.qpos, torso_rot)
         reward, terms = task.reward(
-            forward_velocity, power, actions, self.last_action, task.up_z(torso_rot), fell, foot_slip
+            vx=vx, vy=vy, motor_power=power, action=actions, last_action=self.last_action,
+            up_z=task.up_z(torso_rot), fell=fell, foot_slip=foot_slip,
+            feet_down=feet_down, landed=landed, air_time=air_at_landing,
+            foot_height=task.foot_heights(self.geom_xpos),
+            phase=task.gait_phase(self.episode_length + 1),  # the clock after this step
         )
         self.last_action = actions
         self.episode_length += 1
@@ -226,6 +238,7 @@ class GpuWalkEnv:
         with self._warp():
             mjw.kinematics(self.m, self.d)  # body/geom poses of the new states, for the observation
         self.last_action[mask] = 0.0
+        self.air_time[mask] = 0.0
         self.episode_length[mask] = 0
         self.episode_return[mask] = 0.0
         self.start_x[mask] = self.qpos[mask, 0]

@@ -10,7 +10,7 @@ free-floating torso, every motor is a position actuator on a joint, and a
 "home" keyframe holds the standing pose's motor targets.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 
 import mujoco
 import numpy as np
@@ -23,9 +23,34 @@ class WalkConfig:
     action_scale: float = 0.5  # action +-1 = target +-0.5 rad around the home pose
     episode_seconds: float = 20.0  # then the episode is cut off ("truncated")
 
-    # --- reward: one number per control step; the policy learns to make the sum large
-    forward_weight: float = 1.0  # x forward speed (m/s)...
-    max_reward_speed: float = 1.0  # ...counted up to this speed, so sprinting recklessly doesn't pay
+    # --- reward: one number per control step; the policy learns to make the sum large.
+    # The task (since 2026-09-25): a calm trot-walk at a target speed along +x.
+    target_speed: float = 0.4  # m/s: a walk for this robot size (it runs above ~0.8 m/s)
+    tracking_weight: float = 2.0  # x exp(-speed_error^2 / tracking_sigma): full reward exactly on target
+    # (m/s)^2; off by 0.1 m/s -> 90% of the reward, by 0.2 -> 67%, standing still -> 20%.
+    # (trot_rsl used 0.25, so loose that it settled at 0.31 m/s for 97%.)
+    tracking_sigma: float = 0.1
+    support_weight: float = 1.0  # penalty for each step with fewer than 2 feet down (no running/hopping)
+
+    # Gait clock (since trot_clock): a built-in rhythm, like a metronome for the
+    # legs. The policy sees the clock's phase and is rewarded when each foot is
+    # on the ground exactly when the schedule says: the diagonal pairs FL+RR
+    # and FR+RL take turns, each foot down for `gait_duty` of every cycle.
+    # Without it, the policy found a loophole (trot_rsl: back feet never
+    # lifted, it scooted). gait_frequency 0 = no clock (runs before it existed).
+    gait_frequency: float = 2.0  # cycles per second: each foot steps twice a second
+    gait_duty: float = 0.6  # share of a cycle each foot is down; > 0.5 = a walk (never airborne)
+    gait_weight: float = 1.0  # x share of feet whose contact matches the schedule
+    swing_height: float = 0.04  # m: lift swinging feet this high ...
+    clearance_weight: float = 0.5  # ... x mean over swinging feet of min(height / swing_height, 1)
+
+    # The trot-walk's first reward (trot_rsl), replaced by the clock:
+    trot_weight: float = 0.0  # diagonal feet in the same state (flaw: "all four down" counts too)
+    air_time_weight: float = 0.0  # per landing: x (its swing time - air_time_target)
+    air_time_target: float = 0.25
+    # The first task (walk_10m .. walk_gpu_v5): forward speed, counted up to max_reward_speed.
+    forward_weight: float = 0.0
+    max_reward_speed: float = 1.0
     upright_weight: float = 0.5  # torso "up" axis . world up: 1 level, 0 on its side
     energy_weight: float = 0.002  # per watt of mechanical motor power |torque x joint speed|
     smoothness_weight: float = 0.05  # per unit of squared action change (discourages jitter)
@@ -48,7 +73,25 @@ class WalkConfig:
     def from_run(cls, saved: dict) -> "WalkConfig":
         """Settings from a run's run.json. A setting added after the run was
         trained gets the value that reproduces how it was trained."""
-        before_it_existed = {"slip_weight": 0.0}
+        before_it_existed = {
+            "slip_weight": 0.0,
+            # the first task: run.json files from then all saved forward_weight=1.0
+            "tracking_weight": 0.0,
+            "support_weight": 0.0,
+            "trot_weight": 0.0,
+            "air_time_weight": 0.0,
+            "gait_frequency": 0.0,
+            "gait_weight": 0.0,
+            "clearance_weight": 0.0,
+        }
+        unknown = sorted(set(saved) - {f.name for f in fields(cls)})
+        if unknown:
+            # The run was trained by newer code than this process is running
+            # (typically a server started before `git pull` / a code change).
+            raise ValueError(
+                f"this run uses task settings this code doesn't know ({', '.join(unknown)}). "
+                "If the code was updated since the server started, restart it (uv run scripts/serve.py)."
+            )
         return cls(**{**before_it_existed, **saved})
 
 
@@ -72,14 +115,31 @@ class WalkTask:
 
         self.num_actions = model.nu
         # torso height, gravity (3), linear velocity (3), angular velocity (3),
-        # then per motor: joint angle, joint speed, previous action
-        self.obs_size = 1 + 3 + 3 + 3 + 3 * model.nu
+        # then per motor: joint angle, joint speed, previous action,
+        # then with the gait clock: its phase as (sin, cos)
+        self.clock = config.gait_frequency > 0
+        self.obs_size = 1 + 3 + 3 + 3 + 3 * model.nu + (2 if self.clock else 0)
+        # Phase advance per control step. Phases are computed from the integer
+        # step count in float64 (here and on the GPU), so both agree exactly,
+        # even right at a cycle boundary.
+        self.cycles_per_step = self.control_dt * config.gait_frequency
 
         # Feet (project convention: geoms named "<leg>_foot"), for the slip
         # penalty. A foot counts as on the ground when its lowest point is
         # within FOOT_CONTACT_MARGIN of the floor (spheres: center z - radius).
         self.feet = np.array([g for g in range(model.ngeom) if model.geom(g).name.endswith("_foot")], dtype=int)
         self.foot_radius = model.geom_size[self.feet, 0]
+        # Diagonal leg pairs (indices into self.feet) for the trot reward:
+        # front-left with rear-right, front-right with rear-left.
+        foot_index = {model.geom(g).name.removesuffix("_foot"): i for i, g in enumerate(self.feet)}
+        self.diagonal_pairs = [
+            (foot_index[a], foot_index[b]) for a, b in (("FL", "RR"), ("FR", "RL")) if a in foot_index and b in foot_index
+        ]
+        # Gait clock: when in the cycle each foot's stance starts. The first
+        # pair (FL+RR) at phase 0, the second (FR+RL) half a cycle later.
+        self.foot_phase_offset = np.zeros(len(self.feet))
+        if len(self.diagonal_pairs) == 2:
+            self.foot_phase_offset[list(self.diagonal_pairs[1])] = 0.5
 
         self.standing_qpos, self.standing_qvel = self._settled_standing_state(keyframe)
         self.standing_height = float(self.standing_qpos[2])
@@ -98,8 +158,9 @@ class WalkTask:
 
     # ------------------------------------------------------------- observation
 
-    def observation(self, data: mujoco.MjData, last_action: np.ndarray) -> np.ndarray:
-        """What the policy "feels", like a real robot's IMU and joint encoders.
+    def observation(self, data: mujoco.MjData, last_action: np.ndarray, phase: float = 0.0) -> np.ndarray:
+        """What the policy "feels", like a real robot's IMU and joint encoders
+        (plus, with the gait clock, where in the stepping rhythm it is).
 
         Directions are expressed in the torso's own frame, so the policy
         behaves the same whichever way the robot faces, and absolute x/y
@@ -116,34 +177,87 @@ class WalkTask:
         angular_velocity = data.qvel[3:6]  # ... angular velocity already in the torso's frame
         joint_angles = data.qpos[self.joint_qpos] - self.home_ctrl  # relative to the standing pose
         joint_speeds = data.qvel[self.joint_qvel]
-        return np.concatenate(
-            [[data.qpos[2]], gravity, linear_velocity, angular_velocity, joint_angles, joint_speeds, last_action]
-        ).astype(np.float32)
+        parts = [[data.qpos[2]], gravity, linear_velocity, angular_velocity, joint_angles, joint_speeds, last_action]
+        if self.clock:
+            # sin/cos rather than the raw phase: 0.99 and 0.01 are neighbors
+            # on a circle, and the policy should see them as close.
+            parts.append([np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)])
+        return np.concatenate(parts).astype(np.float32)
+
+    # -------------------------------------------------------------- gait clock
+
+    def gait_phase(self, step: int) -> float:
+        """Where in the stepping cycle (0..1) the clock is after `step` control steps of an episode."""
+        return (step * self.cycles_per_step) % 1.0
+
+    def desired_down(self, phase: float) -> np.ndarray:
+        """Per foot: should it be on the ground at this phase?"""
+        return (phase - self.foot_phase_offset) % 1.0 < self.config.gait_duty
 
     # ------------------------------------------------------------------ reward
 
     def reward(
         self,
-        forward_velocity: float,
+        *,
+        vx: float,
+        vy: float,
         motor_power: float,
         action: np.ndarray,
         last_action: np.ndarray,
         up_z: float,
         fell: bool,
-        foot_slip: float = 0.0,
+        foot_slip: float,
+        feet_down: np.ndarray,
+        landed: np.ndarray,
+        air_time: np.ndarray,
+        foot_height: np.ndarray,
+        phase: float,
     ) -> tuple[float, dict[str, float]]:
         """Reward for one control step, plus each term separately (for logging).
-        foot_slip: sum over grounded feet of (sliding speed)^2, see foot_slip()."""
+
+        vx, vy: torso velocity over the step (world frame), m/s.
+        foot_slip: sum over planted feet of (sliding speed)^2, see foot_slip().
+        feet_down: which feet are on the ground (bool per foot).
+        landed, air_time: which feet touched down this step, and how long each
+            had been in the air (see air_time_update()).
+        foot_height: each foot's lowest point above the floor, m (foot_heights()).
+        phase: the gait clock at the end of the step (gait_phase()).
+        """
         c = self.config
+        gait = clearance = 0.0
+        if self.clock:
+            should_be_down = self.desired_down(phase)
+            gait = float(np.mean(feet_down == should_be_down))
+            swinging = ~should_be_down
+            if swinging.any():
+                clearance = float(np.mean(np.clip(foot_height[swinging] / c.swing_height, 0.0, 1.0)))
+        speed_error_sq = (vx - c.target_speed) ** 2 + vy**2  # includes drifting sideways
+        extra_air = np.clip(air_time - c.air_time_target, -c.air_time_target, 0.3)  # capped: no endless lifts
+        diagonal_sync = [float(feet_down[a] == feet_down[b]) for a, b in self.diagonal_pairs]
         terms = {
-            "forward": c.forward_weight * min(float(forward_velocity), c.max_reward_speed),
+            "tracking": c.tracking_weight * float(np.exp(-speed_error_sq / c.tracking_sigma)),
+            "forward": c.forward_weight * min(float(vx), c.max_reward_speed),
             "upright": c.upright_weight * up_z,
+            "trot": c.trot_weight * (float(np.mean(diagonal_sync)) if diagonal_sync else 0.0),
+            "air_time": c.air_time_weight * float(np.sum(np.where(landed, extra_air, 0.0))),
+            "gait": c.gait_weight * gait,
+            "clearance": c.clearance_weight * clearance,
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * float(np.sum((action - last_action) ** 2)),
             "slip": -c.slip_weight * foot_slip,
+            "support": -c.support_weight * float(np.sum(feet_down) < 2),
             "fall": -c.fall_penalty if fell else 0.0,
         }
         return float(sum(terms.values())), terms
+
+    def air_time_update(
+        self, prev_down: np.ndarray, air_time: np.ndarray, down: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Swing bookkeeping per foot, once per control step.
+        Returns (landed this step, air time it had when landing, new air_time state)."""
+        landed = down & ~prev_down
+        new_air_time = np.where(down, 0.0, air_time + self.control_dt)
+        return landed, air_time.copy(), new_air_time
 
     # ----------------------------------------------------------------- feet
 
@@ -154,6 +268,10 @@ class WalkTask:
         pos = data.geom_xpos[self.feet]
         on_ground = pos[:, 2] - self.foot_radius < self.FOOT_CONTACT_MARGIN
         return pos[:, :2].copy(), on_ground
+
+    def foot_heights(self, data: mujoco.MjData) -> np.ndarray:
+        """Each foot's lowest point above the floor (m; ~0 when planted)."""
+        return data.geom_xpos[self.feet, 2] - self.foot_radius
 
     def foot_slip(self, before: tuple[np.ndarray, np.ndarray], after: tuple[np.ndarray, np.ndarray]) -> float:
         """Sum of squared sliding speeds (m/s)^2 of feet that stayed on the

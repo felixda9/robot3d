@@ -37,11 +37,13 @@ def snapshots():
         d = env.data
         before = {"qpos": d.qpos.copy(), "qvel": d.qvel.copy(), "rot": d.xmat[1].reshape(3, 3).copy(),
                   "geom_xpos": d.geom_xpos.copy(), "last_action": env._last_action.copy()}
-        obs_before = task.observation(d, env._last_action)
+        phase = task.gait_phase(env._steps)
+        obs_before = task.observation(d, env._last_action, phase)
         feet_before = task.feet_state(d)
         env.step(rng.uniform(-1, 1, task.num_actions))
         after = {"qpos": d.qpos.copy(), "geom_xpos": d.geom_xpos.copy(), "rot": d.xmat[1].reshape(3, 3).copy()}
         rows.append({
+            "steps": env._steps - 1,  # step count at "before"
             "before": before,
             "after": after,
             "obs_before": obs_before,
@@ -59,9 +61,10 @@ def stack(rows, part, key):
 def test_observation_matches(snapshots):
     task, rows = snapshots
     batched = BatchedWalkTask(task, "cpu")
+    steps = torch.tensor([r["steps"] for r in rows])
     obs = batched.observation(
         stack(rows, "before", "qpos"), stack(rows, "before", "qvel"),
-        stack(rows, "before", "rot"), stack(rows, "before", "last_action"),
+        stack(rows, "before", "rot"), stack(rows, "before", "last_action"), batched.gait_phase(steps),
     )
     expected = torch.tensor(np.stack([r["obs_before"] for r in rows]))
     assert obs.shape == (N, task.obs_size)
@@ -96,19 +99,52 @@ def test_action_to_ctrl_and_reward_match(snapshots):
     torch.testing.assert_close(batched.action_to_ctrl(torch.tensor(actions, dtype=torch.float32)),
                                torch.tensor(expected, dtype=torch.float32))
 
+    nfeet = len(task.feet)
     inputs = {
-        "forward_velocity": rng.uniform(-0.5, 2.0, N), "motor_power": rng.uniform(0, 80, N),
+        "vx": rng.uniform(-0.5, 2.0, N), "vy": rng.uniform(-0.5, 0.5, N), "motor_power": rng.uniform(0, 80, N),
         "action": rng.uniform(-1, 1, (N, task.num_actions)), "last_action": rng.uniform(-1, 1, (N, task.num_actions)),
         "up_z": rng.uniform(-1, 1, N), "fell": rng.random(N) < 0.3, "foot_slip": rng.uniform(0, 0.5, N),
+        "feet_down": rng.random((N, nfeet)) < 0.6, "landed": rng.random((N, nfeet)) < 0.3,
+        "air_time": rng.uniform(0, 0.8, (N, nfeet)), "foot_height": rng.uniform(-0.001, 0.06, (N, nfeet)),
+        "phase": np.array([task.gait_phase(int(s)) for s in rng.integers(0, 1000, N)]),
     }
-    rewards, terms = batched.reward(**{k: torch.tensor(v, dtype=torch.bool if k == "fell" else torch.float32)
+    booleans = ("fell", "feet_down", "landed")
+    dtypes = {k: torch.bool for k in booleans} | {"phase": torch.float64}
+    rewards, terms = batched.reward(**{k: torch.tensor(v, dtype=dtypes.get(k, torch.float32))
                                        for k, v in inputs.items()})
     for i in range(N):
-        r, t = task.reward(*(inputs[k][i] for k in ("forward_velocity", "motor_power", "action", "last_action",
-                                                    "up_z", "fell", "foot_slip")))
+        r, t = task.reward(**{k: v[i] for k, v in inputs.items()})
         assert rewards[i].item() == pytest.approx(r, rel=1e-5, abs=1e-5)
+        assert set(t) == set(terms)
         for name, value in t.items():
             assert terms[name][i].item() == pytest.approx(value, rel=1e-5, abs=1e-5), name
+
+
+def test_gait_clock_matches_exactly(snapshots):
+    """Every step of a long episode, including the cycle boundaries, where a
+    float32 phase could land on the other side of 0 and flip the schedule."""
+    task, _ = snapshots
+    batched = BatchedWalkTask(task, "cpu")
+    steps = torch.arange(0, 2 * task.max_steps)
+    phases = batched.gait_phase(steps)
+    expected = [task.gait_phase(int(s)) for s in steps]
+    assert phases.tolist() == expected
+    down = batched.desired_down(phases)
+    assert down.tolist() == [task.desired_down(p).tolist() for p in expected]
+
+
+def test_air_time_update_matches(snapshots):
+    task, _ = snapshots
+    batched = BatchedWalkTask(task, "cpu")
+    rng = np.random.default_rng(2)
+    prev = rng.random((N, len(task.feet))) < 0.5
+    down = rng.random((N, len(task.feet))) < 0.5
+    air = rng.uniform(0, 0.5, (N, len(task.feet)))
+    got = batched.air_time_update(torch.tensor(prev), torch.tensor(air, dtype=torch.float32), torch.tensor(down))
+    for i in range(N):
+        expected = task.air_time_update(prev[i], air[i], down[i])
+        for g, e in zip(got, expected):
+            np.testing.assert_allclose(g[i].numpy(), e, rtol=1e-6, atol=1e-6)
 
 
 def test_reset_state_noise(snapshots):

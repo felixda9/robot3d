@@ -69,10 +69,12 @@ class PolicyController:
                 f"{info['robot']!r} with this task gives {self.task.obs_size}. Wrong robot?"
             )
         self.last_action = np.zeros(self.task.num_actions)
+        self.steps = 0  # control steps since the (re)start: drives the gait clock
         self._rng = np.random.default_rng()
 
     def reset(self) -> None:
         self.last_action = np.zeros(self.task.num_actions)
+        self.steps = 0
 
     def reset_state(self, data: mujoco.MjData) -> None:
         """Start like a training episode: standing, with the same small noise."""
@@ -80,7 +82,9 @@ class PolicyController:
 
     def action(self, data: mujoco.MjData) -> np.ndarray:
         """The policy's action (-1..1 per motor) for the current state."""
-        action = self._predict(self.task.observation(data, self.last_action))
+        phase = self.task.gait_phase(self.steps)
+        action = self._predict(self.task.observation(data, self.last_action, phase))
+        self.steps += 1
         self.last_action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         return self.last_action
 
@@ -97,17 +101,21 @@ def evaluate(checkpoint: Checkpoint, episodes: int = 5, seed: int = 0) -> list[d
     env = WalkEnv(info["robot"], WalkConfig.from_run(info["walk_config"]))
     controller = PolicyController(checkpoint, env.model)
     results = []
+    task = env.task
+    settle_steps = round(1.0 / task.control_dt)  # skip the first second (starting up) for gait numbers
     for episode in range(episodes):
         env.reset(seed=seed + episode)
         controller.reset()
         total, steps = 0.0, 0
+        feet_down = []  # per step: which feet are on the ground
         while True:
             _, reward, terminated, truncated, step_info = env.step(controller.action(env.data))
             total += reward
             steps += 1
+            feet_down.append(task.feet_state(env.data)[1])
             if terminated or truncated:
                 break
-        seconds = steps * env.task.control_dt
+        seconds = steps * task.control_dt
         results.append(
             {
                 "return": total,
@@ -115,6 +123,27 @@ def evaluate(checkpoint: Checkpoint, episodes: int = 5, seed: int = 0) -> list[d
                 "distance": step_info["distance"],
                 "speed": step_info["distance"] / seconds,
                 "fell": terminated,
+                **gait_numbers(np.array(feet_down[settle_steps:]), task),
             }
         )
     return results
+
+
+def gait_numbers(feet_down: np.ndarray, task: WalkTask) -> dict:
+    """Walk-or-run numbers from (steps, feet) on-the-ground flags.
+
+    duty_factor: share of time each foot is on the ground (walk > 0.5, run < 0.5).
+    airborne: share of time with all feet in the air (a walk: 0).
+    diagonal_sync: share of time diagonal feet are both down or both up (trot: ~1).
+    cadence: touchdowns per foot per second.
+    """
+    if len(feet_down) < 2:
+        return {"duty_factor": None, "airborne": None, "diagonal_sync": None, "cadence": None}
+    touchdowns = (feet_down[1:] & ~feet_down[:-1]).sum(axis=0)
+    sync = [np.mean(feet_down[:, a] == feet_down[:, b]) for a, b in task.diagonal_pairs]
+    return {
+        "duty_factor": float(feet_down.mean()),
+        "airborne": float(np.mean(feet_down.sum(axis=1) == 0)),
+        "diagonal_sync": float(np.mean(sync)) if sync else None,
+        "cadence": float(touchdowns.mean() / (len(feet_down) * task.control_dt)),
+    }

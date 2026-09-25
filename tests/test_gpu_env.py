@@ -33,6 +33,7 @@ def put_cpu_state_into_world(gpu_env, world, cpu_env):
     with wp.ScopedDevice(gpu_env.wp_device), wp.ScopedStream(wp.stream_from_torch(gpu_env.device)):
         mjw.kinematics(gpu_env.m, gpu_env.d)
     gpu_env.last_action[world] = 0.0
+    gpu_env.air_time[world] = 0.0
     gpu_env.episode_length[world] = 0
     gpu_env.start_x[world] = gpu_env.qpos[world, 0]
     xy, down = gpu_env.task.feet_state(gpu_env.geom_xpos)
@@ -73,6 +74,30 @@ def test_fallen_robots_restart_standing(gpu_env):
     assert gpu_env.episode_length[5] == 0  # restarted
     assert gpu_env.qpos[5, 2].item() == pytest.approx(gpu_env.task.standing_height, abs=0.02)
     assert result.obs[5, 0].item() == pytest.approx(gpu_env.task.standing_height, abs=0.02)  # its new observation
+
+
+def test_tiny_rsl_training_run_plays_in_cpu_mujoco(tmp_path):
+    from robot3d.gpu.rsl import RslConfig, train_rsl
+    from robot3d.policy import PolicyController
+    from robot3d.runs import list_checkpoints, read_run_info
+    from robot3d.simulation import Simulation
+
+    run_dir = train_rsl(
+        total_steps=256 * 24 * 3,
+        name="tiny_rsl",
+        checkpoint_every=256 * 24,
+        rsl=RslConfig(num_envs=256),
+        runs_dir=tmp_path,
+        log=lambda *_: None,
+    )
+    assert read_run_info(run_dir)["trainer"] == "rsl-rl"
+    checkpoints = list_checkpoints(run_dir)
+    assert len(checkpoints) >= 2
+    sim = Simulation("quadruped")
+    sim.set_controller(PolicyController(checkpoints[-1], sim.model))  # TorchScript actor on the CPU
+    for _ in range(50):
+        sim.step()
+    assert np.isfinite(sim.data.qpos).all()
 
 
 def test_tiny_gpu_training_run_plays_in_cpu_mujoco(tmp_path):

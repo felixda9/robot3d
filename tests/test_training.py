@@ -46,7 +46,38 @@ def test_evaluate_runs_full_episodes(tiny_run):
     assert len(results) == 2
     for r in results:
         assert 0 < r["seconds"] <= 20.0
-        assert set(r) == {"return", "seconds", "distance", "speed", "fell"}
+        assert set(r) == {
+            "return", "seconds", "distance", "speed", "fell",
+            "duty_factor", "airborne", "diagonal_sync", "cadence",
+        }
+
+
+def test_gait_numbers_tell_a_trot_from_a_run():
+    from robot3d.envs import WalkEnv
+    from robot3d.policy import gait_numbers
+
+    task = WalkEnv().task
+    (a1, a2), (b1, b2) = task.diagonal_pairs
+    steps = 100  # 2 s at 50 Hz
+    # Trot-walk: one diagonal pair down for 12 steps, overlapping 2 steps with
+    # the other pair (both down), period 20 steps = 0.4 s.
+    trot = np.zeros((steps, 4), dtype=bool)
+    phase = np.arange(steps) % 20
+    trot[:, [a1, a2]] = (phase < 12)[:, None]
+    trot[:, [b1, b2]] = ((phase >= 10) | (phase < 2))[:, None]
+    g = gait_numbers(trot, task)
+    assert g["duty_factor"] == pytest.approx(0.6)
+    assert g["airborne"] == 0.0
+    assert g["diagonal_sync"] == 1.0
+    assert g["cadence"] == pytest.approx(2.5, abs=0.3)  # 1 touchdown per 0.4 s
+
+    run = trot.copy()
+    run[phase >= 16] = False  # a flight phase: all four feet up 20% of the time
+    g = gait_numbers(run, task)
+    assert g["airborne"] == pytest.approx(0.2)
+    assert g["duty_factor"] < 0.6
+
+    assert gait_numbers(trot[:1], task)["duty_factor"] is None  # fell right away: no gait
 
 
 def test_policy_drives_a_live_simulation(tiny_run):

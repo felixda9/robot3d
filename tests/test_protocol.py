@@ -60,6 +60,8 @@ def shape(node: dict, root: dict) -> Any:
         if key in node:
             return ("union", tuple(sorted((shape(n, root) for n in node[key]), key=repr)))
     kind = node.get("type")
+    if isinstance(kind, list):  # {"type": ["number", "null"]} (TypeScript) = anyOf (Pydantic)
+        return ("union", tuple(sorted((shape({**node, "type": k}, root) for k in kind), key=repr)))
     if kind == "object":
         values = node.get("additionalProperties")
         if isinstance(values, dict) and not node.get("properties"):

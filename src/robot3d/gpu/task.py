@@ -38,6 +38,12 @@ class BatchedWalkTask:
         self.foot_radius = tensor(task.foot_radius)
         self.standing_qpos = tensor(task.standing_qpos)
         self.standing_qvel = tensor(task.standing_qvel)
+        pairs = task.diagonal_pairs or [(0, 0)]
+        self.pair_a = tensor([a for a, _ in pairs], torch.long)
+        self.pair_b = tensor([b for _, b in pairs], torch.long)
+        self.has_pairs = bool(task.diagonal_pairs)
+        self.clock = task.clock
+        self.foot_phase_offset = tensor(task.foot_phase_offset, torch.float64)
 
     # ----------------------------------------------------------------- actions
 
@@ -49,48 +55,100 @@ class BatchedWalkTask:
     # ------------------------------------------------------------- observation
 
     def observation(
-        self, qpos: torch.Tensor, qvel: torch.Tensor, torso_rot: torch.Tensor, last_action: torch.Tensor
+        self,
+        qpos: torch.Tensor,
+        qvel: torch.Tensor,
+        torso_rot: torch.Tensor,
+        last_action: torch.Tensor,
+        phase: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """(N, obs_size) observations. torso_rot: (N, 3, 3) torso-to-world rotations."""
+        """(N, obs_size) observations. torso_rot: (N, 3, 3) torso-to-world
+        rotations; phase: (N,) gait clock (gait_phase())."""
         # R^T @ v for every robot: world directions -> torso frame.
         gravity = torch.einsum("nji,j->ni", torso_rot, torso_rot.new_tensor(_DOWN))
         linear_velocity = torch.einsum("nji,nj->ni", torso_rot, qvel[:, 0:3])
-        return torch.cat(
-            [
-                qpos[:, 2:3],
-                gravity,
-                linear_velocity,
-                qvel[:, 3:6],
-                qpos[:, self.joint_qpos] - self.home_ctrl,
-                qvel[:, self.joint_qvel],
-                last_action,
-            ],
-            dim=1,
-        )
+        parts = [
+            qpos[:, 2:3],
+            gravity,
+            linear_velocity,
+            qvel[:, 3:6],
+            qpos[:, self.joint_qpos] - self.home_ctrl,
+            qvel[:, self.joint_qvel],
+            last_action,
+        ]
+        if self.clock:
+            angle = 2 * torch.pi * phase
+            parts.append(torch.stack([angle.sin(), angle.cos()], dim=1).float())
+        return torch.cat(parts, dim=1)
+
+    # -------------------------------------------------------------- gait clock
+
+    def gait_phase(self, steps: torch.Tensor) -> torch.Tensor:
+        """(N,) float64 phases (0..1) from (N,) step counts; float64 like WalkTask, so they agree exactly."""
+        return torch.remainder(steps.double() * self.task.cycles_per_step, 1.0)
+
+    def desired_down(self, phase: torch.Tensor) -> torch.Tensor:
+        """(N, feet) bool: should each foot be on the ground at these phases?"""
+        return torch.remainder(phase[:, None] - self.foot_phase_offset, 1.0) < self.config.gait_duty
 
     # ------------------------------------------------------------------ reward
 
     def reward(
         self,
-        forward_velocity: torch.Tensor,
+        *,
+        vx: torch.Tensor,
+        vy: torch.Tensor,
         motor_power: torch.Tensor,
         action: torch.Tensor,
         last_action: torch.Tensor,
         up_z: torch.Tensor,
         fell: torch.Tensor,
         foot_slip: torch.Tensor,
+        feet_down: torch.Tensor,
+        landed: torch.Tensor,
+        air_time: torch.Tensor,
+        foot_height: torch.Tensor,
+        phase: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """(N,) rewards and (N,) per-term values, same terms as WalkTask.reward."""
+        """(N,) rewards and (N,) per-term values, same terms as WalkTask.reward.
+        feet_down, landed: (N, feet) bool; air_time, foot_height: (N, feet);
+        phase: (N,) float64."""
         c = self.config
+        if self.clock:
+            should_be_down = self.desired_down(phase)
+            gait = (feet_down == should_be_down).float().mean(dim=1)
+            swinging = (~should_be_down).float()
+            lift = (foot_height / c.swing_height).clamp(0.0, 1.0)
+            clearance = (lift * swinging).sum(dim=1) / swinging.sum(dim=1).clamp(min=1.0)  # 0 if none swings
+        else:
+            gait = clearance = torch.zeros_like(vx)
+        speed_error_sq = (vx - c.target_speed) ** 2 + vy**2
+        extra_air = (air_time - c.air_time_target).clamp(-c.air_time_target, 0.3)
+        if self.has_pairs:
+            trot = (feet_down[:, self.pair_a] == feet_down[:, self.pair_b]).float().mean(dim=1)
+        else:
+            trot = torch.zeros_like(vx)
         terms = {
-            "forward": c.forward_weight * forward_velocity.clamp(max=c.max_reward_speed),
+            "tracking": c.tracking_weight * torch.exp(-speed_error_sq / c.tracking_sigma),
+            "forward": c.forward_weight * vx.clamp(max=c.max_reward_speed),
             "upright": c.upright_weight * up_z,
+            "trot": c.trot_weight * trot,
+            "air_time": c.air_time_weight * torch.where(landed, extra_air, torch.zeros_like(extra_air)).sum(dim=1),
+            "gait": c.gait_weight * gait,
+            "clearance": c.clearance_weight * clearance,
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * ((action - last_action) ** 2).sum(dim=1),
             "slip": -c.slip_weight * foot_slip,
+            "support": -c.support_weight * (feet_down.sum(dim=1) < 2).float(),
             "fall": -c.fall_penalty * fell.float(),
         }
         return torch.stack(list(terms.values())).sum(dim=0), terms
+
+    def air_time_update(self, prev_down: torch.Tensor, air_time: torch.Tensor, down: torch.Tensor):
+        """Same as WalkTask.air_time_update, for (N, feet) tensors."""
+        landed = down & ~prev_down
+        new_air_time = torch.where(down, torch.zeros_like(air_time), air_time + self.control_dt)
+        return landed, air_time.clone(), new_air_time
 
     # ------------------------------------------------------------------- state
 
@@ -107,6 +165,10 @@ class BatchedWalkTask:
         pos = geom_xpos[:, self.feet]
         on_ground = pos[..., 2] - self.foot_radius < WalkTask.FOOT_CONTACT_MARGIN
         return pos[..., :2].clone(), on_ground
+
+    def foot_heights(self, geom_xpos: torch.Tensor) -> torch.Tensor:
+        """(N, feet) each foot's lowest point above the floor."""
+        return geom_xpos[:, self.feet, 2] - self.foot_radius
 
     def foot_slip(self, before, after) -> torch.Tensor:
         (xy0, down0), (xy1, down1) = before, after

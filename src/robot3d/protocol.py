@@ -175,6 +175,11 @@ class EvaluationInfo(_Message):
     speed: float
     falls: int
     mean_return: float
+    # Gait numbers (None in evaluations saved before they existed)
+    duty_factor: float | None = None
+    airborne: float | None = None
+    diagonal_sync: float | None = None
+    cadence: float | None = None
 
 
 class CheckpointInfo(_Message):
@@ -194,6 +199,7 @@ class RunDetail(_Message):
     checkpoints: list[CheckpointInfo]
     settings: list[SettingInfo]
     evaluating: int
+    evaluation_error: str
 
 
 class ScalarSeries(_Message):

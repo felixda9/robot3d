@@ -67,9 +67,10 @@ MuJoCo is the physics engine; everything around it is built here.
 
 - Windows 10, NVIDIA RTX 3090 (24 GB), Python 3.12 managed with **uv**;
   Node 24 + npm for the frontend (Vite 8, TypeScript 7, three.js 0.186).
-- CPU: i7-11700K, 8 cores / 16 threads, 32 GB RAM. Training uses **CPU-only
-  PyTorch** (user's choice; pyproject pins torch to the pytorch-cpu index).
-  Stable-Baselines3 2.9, Gymnasium 1.3.
+- CPU: i7-11700K, 8 cores / 16 threads, 32 GB RAM. PyTorch 2.14 **CUDA 13.0
+  build** (pyproject pins torch to the pytorch-cu130 index; it started CPU-only,
+  switched for GPU training). Stable-Baselines3 2.9, Gymnasium 1.3,
+  mujoco-warp 3.14 (Warp 1.17), rsl-rl-lib 5.5.
 - Commands (from the repo root unless noted):
   - `uv sync` and `cd web; npm install`: install everything
   - `uv run pytest`: all tests (physics, real-time loop, server over a real
@@ -79,8 +80,11 @@ MuJoCo is the physics engine; everything around it is built here.
     (`--policy runs/<name>` = a trained policy drives, newest checkpoint)
   - `cd web; npm run dev`: frontend dev server on http://localhost:5173
     (start the backend too)
-  - `uv run scripts/train.py`: PPO training (10M steps, ~30 min; `--steps`,
-    `--envs`, `--name`, `--seed`); Ctrl+C stops and still saves a checkpoint
+  - `uv run scripts/train.py`: PPO training on the CPU (10M steps, ~30 min;
+    `--steps`, `--envs`, `--name`, `--seed`); Ctrl+C stops and still saves a checkpoint
+  - `uv run scripts/train_gpu.py`: training on the GPU (MuJoCo Warp, 4096 robots;
+    `--trainer ppo|rsl`, `--steps`, `--envs`, `--name`, `--seed`,
+    `--checkpoint-every`, `--epochs`, `--minibatches`)
   - `uv run tensorboard --logdir runs`: training curves on http://localhost:6006
   - `uv run scripts/evaluate.py runs/<name> [--all]`: headless distance/speed/falls
     (also caches results for the dashboard)
@@ -103,8 +107,14 @@ src/robot3d/
   training.py           train(): PPO, run folders, checkpoints, TensorBoard metrics
   runs.py               run folders for the dashboard: list/status/checkpoints/curves/
                         eval cache; Checkpoint + find_checkpoint (no PyTorch import)
-  policy.py             PolicyController (plays a policy), evaluate()
-scripts/                view_mujoco.py, serve.py, train.py, evaluate.py
+  policy.py             PolicyController (plays a policy), evaluate() + gait numbers
+  gpu/                  GPU training (MuJoCo Warp + PyTorch):
+    task.py             BatchedWalkTask: walk.py as batched torch math (parity-tested)
+    env.py              GpuWalkEnv: N robots, CUDA graph physics, auto-reset
+    ppo.py              own PPO (train_gpu), ActorCritic, TorchPolicy (plays .pt on CPU)
+    rsl.py              RSL-RL's PPO driven by our env (train_rsl), TorchScript export
+    common.py           run folder + TensorBoard logging shared by both trainers
+scripts/                view_mujoco.py, serve.py, train.py, train_gpu.py, evaluate.py
 tests/                  pytest (conftest.py: a tiny real training run, shared)
 runs/<name>/            training output (gitignored): run.json, tb/, checkpoints/
 web/                    Vite + TypeScript + three.js frontend
@@ -140,8 +150,9 @@ web/                    Vite + TypeScript + three.js frontend
 - [ ] **5b. GPU-parallel training** (moved up from "Future" on 2026-09-24 at the
   user's request): MuJoCo Warp physics + batched walk task + PPO in PyTorch on
   the RTX 3090; same metrics/dashboard as CPU runs; GPU checkpoints replay
-  in CPU MuJoCo. **Pipeline done and verified; the GPU PPO recipe isn't yet
-  as sample-efficient or stable as CPU** (see Decisions: GPU tuning).
+  in CPU MuJoCo. **Pipeline done and verified. Since separate gradient
+  clipping, our GPU PPO is stable** (trot_ppo: 18/18 checkpoints good);
+  now used for the trot-walk (see Decisions, 2026-09-25).
 - [ ] **6. Robot designer:** simple YAML/JSON robot spec (body parts, joints,
   motors) → generated MJCF; then a visual editor in the browser.
 - [ ] **7. Environments & commands:** terrain, stairs, obstacles. Train a policy
@@ -438,11 +449,90 @@ web/                    Vite + TypeScript + three.js frontend
       100M+ steps would take hours on the CPU.
   - Transfer works throughout: every GPU checkpoint runs in float64 CPU
     MuJoCo without falls.
+- **2026-09-25: Gait feedback → a trot-walk task** (user: both walkers "run";
+  GPU gait more natural with longer strides, CPU tiny rapid steps; both ~45%
+  of the time airborne). User chose: **trot-walk at 0.4 m/s, trained on the
+  GPU, check RSL-RL first**. The first version of the task:
+  - `tracking` = 2 × exp(−speed error² / σ) around target_speed 0.4 m/s
+    (replaces raw forward speed; `forward_weight` 0 keeps the old term for
+    old runs);
+  - `support`: −1 per step with fewer than 2 feet down (no flight phases);
+  - `trot`: diagonal feet (FL+RR, FR+RL) in the same state;
+  - `air_time`: per landing, 2 × (swing time − 0.25 s), legged_gym style.
+  - `WalkConfig.from_run` fills settings missing from older runs with the
+    values that reproduce them, and raises a clear error for settings it
+    doesn't know (a run trained by newer code than the running server).
+- **2026-09-25: RSL-RL** (`gpu/rsl.py`, rsl-rl-lib 5.5): its PPO class driven
+  from our own loop (our GpuWalkEnv, not its VecEnv/runner), legged_gym's
+  recipe (4096 × 24, 5 epochs × 4 minibatches, adaptive lr on KL 0.01,
+  entropy 0.01, [512, 256, 128] ELU, init std 1.0, rewards × 0.02 as in
+  legged_gym's dt scaling). Checkpoints store a TorchScript actor (with its
+  observation normalizer) in the `.pt` ("robot3d-jit-v1"); TorchPolicy plays
+  both .pt formats. (torch.jit prints deprecation warnings; still works in
+  2.14. Move to torch.export when it stops.)
+- **2026-09-25: Our PPO clips actor and critic gradients separately** (as
+  RSL-RL does). Clipped together, the critic's gradients (value errors in
+  reward units) dominate the shared norm, which shrinks every policy update
+  by an arbitrary factor: a likely cause of the v1–v4 good/bad alternation.
+- **2026-09-25: Gait numbers in evaluations** (`policy.gait_numbers`, after
+  the first second): duty factor (share of time each foot is down; walk
+  > 50%), airborne share (all four up), diagonal sync, cadence (touchdowns
+  per foot per second). Optional (null) fields of EvaluationInfo, shown as
+  columns in the dashboard's checkpoint table. Reward terms are split into
+  "Rewards (+)" and "Penalties (−)" charts (≤ 8 lines each).
+- **2026-09-25: Evaluation failures are shown**, not just logged: RunDetail
+  has `evaluation_error` (cleared when evaluation is requested again),
+  shown under the checkpoint table. (Happened: a server started before the
+  walk-task change couldn't read trot_rsl's settings; Watch and Evaluate
+  failed silently.)
+- **2026-09-25: `trot_rsl` result** (RSL-RL, 50M steps, 13 min): stable
+  (0 falls in the last 6 checkpoints), 0.31 m/s, never airborne, but
+  **it scoots**: feet down 94% of the time, back feet never lift (max
+  1.7 mm in an episode), front feet ~1 cm. The trot term paid 0.44 of 0.5
+  because "all four down" counts as in sync, and air_time only penalizes
+  short swings (never lifting costs nothing). A reward flaw, not a trainer
+  problem.
+- **2026-09-25: `trot_ppo` result** (our PPO with separate gradient
+  clipping, same reward as trot_rsl, 50M steps, ~17 min): **a real
+  trot-walk.** From 7.6M steps on, 18/18 checkpoints walk without falls, and
+  the return rises steadily (no good/bad alternation any more). At 50M:
+  0.39 m/s (target 0.4), feet down 55%, never airborne, diagonal sync
+  1.00, all four feet lift 3–4.5 cm, planted feet barely slide (slip
+  −0.002 per step vs −0.132 for trot_rsl). So the trainer matters: on the
+  same flawed reward, RSL-RL found the scoot and ours didn't. **Our PPO is
+  the GPU trainer from here** (user's rule: "whichever GPU trainer is
+  stable"); RSL-RL stays as a reference (`--trainer rsl`).
+- **2026-09-25: Gait clock** (user's choice over reward fixes alone): a
+  2 Hz rhythm, the standard method for gaits in legged RL (periodic reward
+  composition, e.g. Siekmann et al. 2021; walk-these-ways):
+  - phase = step × control_dt × gait_frequency mod 1, from the integer step
+    count in float64 on CPU and GPU (bit-identical, even at cycle
+    boundaries); the observation gets (sin, cos) of it: 34 → 36 numbers.
+    GPU robots with random episode starts get random phases.
+  - Schedule: FL+RR down for phase [0, 0.6), FR+RL for [0.5, 1.1): each foot
+    down 60% of the cycle (a walk), both pairs down twice per cycle for
+    0.05 cycle.
+  - `gait` = share of feet whose contact matches the schedule (weight 1.0);
+    `clearance` = mean over scheduled-swing feet of min(height / 4 cm, 1)
+    (weight 0.5). `trot` and `air_time` default to 0 now.
+  - tracking_sigma 0.25 → 0.1: at 0.25, 0.31 m/s already earned 97%.
+  - Runs from before the clock load with gait_frequency 0 (34 observations,
+    same rewards); checked: trot_rsl and walk_cpu_fixed evaluate to exactly
+    their cached returns.
+- MuJoCo Warp occasionally prints "linesearch iterations limit reached"
+  (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
+  world's contact solve stopped at ls_iterations 50, slightly less
+  converged. Harmless at that rate; not worth a slower solver.
 
 ## Current status
 
-**2026-09-25: M5 confirmed by the user. Working on 5b (GPU training) plus a
-fixed CPU run; waiting for the user to decide how to continue the GPU tuning.**
+**2026-09-25: Working on 5b: a calm trot-walk trained on the GPU.**
+- The user's gait feedback (both walkers ran) led to the trot-walk task, gait
+  numbers in evaluations, RSL-RL as a reference trainer, and a gait clock
+  (see Decisions, 2026-09-25).
+- `trot_ppo` (no clock) already walks: 0.39 m/s, a trot-walk. `trot_clock`
+  (our PPO + gait clock, 50M steps) is training; next: compare the two in
+  the viewer, then the user decides which becomes the default.
 - `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
   - 0 KL spikes (walk_10m: 114, max 50.5);
   - steady 1.0–1.28 m/s after 3M steps;
@@ -457,7 +547,7 @@ fixed CPU run; waiting for the user to decide how to continue the GPU tuning.**
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 73 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 84 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after

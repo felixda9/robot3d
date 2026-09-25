@@ -111,12 +111,21 @@ def find_checkpoint(path: str | Path) -> Checkpoint:
 def save_evaluation(checkpoint: Checkpoint, results: list[dict]) -> EvaluationInfo:
     """Store evaluate() results next to the checkpoint (the dashboard shows them)."""
     n = len(results)
+
+    def mean_of(key: str) -> float | None:
+        values = [r[key] for r in results if r.get(key) is not None]
+        return sum(values) / len(values) if values else None
+
     info = EvaluationInfo(
         episodes=n,
-        distance=sum(r["distance"] for r in results) / n,
-        speed=sum(r["speed"] for r in results) / n,
+        distance=mean_of("distance"),
+        speed=mean_of("speed"),
         falls=sum(bool(r["fell"]) for r in results),
-        mean_return=sum(r["return"] for r in results) / n,
+        mean_return=mean_of("return"),
+        duty_factor=mean_of("duty_factor"),
+        airborne=mean_of("airborne"),
+        diagonal_sync=mean_of("diagonal_sync"),
+        cadence=mean_of("cadence"),
     )
     checkpoint.eval_path.write_text(info.model_dump_json(indent=2) + "\n")
     return info
@@ -204,7 +213,7 @@ def run_summary(run_dir: Path) -> RunSummary:
     )
 
 
-def run_detail(run_dir: Path, evaluating: int = 0) -> RunDetail:
+def run_detail(run_dir: Path, evaluating: int = 0, evaluation_error: str = "") -> RunDetail:
     info = read_run_info(run_dir)
     checkpoints = [
         CheckpointInfo(name=c.name, steps=c.steps, evaluation=c.evaluation()) for c in list_checkpoints(run_dir)
@@ -213,7 +222,13 @@ def run_detail(run_dir: Path, evaluating: int = 0) -> RunDetail:
     for group in ("walk_config", "ppo_config"):
         for key, value in info.get(group, {}).items():
             settings.append(SettingInfo(group=group.removesuffix("_config"), key=key, value=str(value)))
-    return RunDetail(summary=run_summary(run_dir), checkpoints=checkpoints, settings=settings, evaluating=evaluating)
+    return RunDetail(
+        summary=run_summary(run_dir),
+        checkpoints=checkpoints,
+        settings=settings,
+        evaluating=evaluating,
+        evaluation_error=evaluation_error,
+    )
 
 
 # ---------------------------------------------------------- TensorBoard curves
