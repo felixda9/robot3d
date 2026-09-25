@@ -394,5 +394,13 @@ confirmed by the user, who then asked me to run the full training.)
   - Recommended path: MJWarp + PyTorch (own batched env or mjlab), with
     ONNX/weights export to run in CPU MuJoCo. Verify sim-to-sim with
     identical options.
+  - **Measured 2026-09-24 on this PC (native Windows, no WSL):**
+    `uv run --with mujoco-warp` (mujoco-warp 3.14.0, Warp 1.17, CUDA 12.9)
+    sees the RTX 3090. `mjwarp-testspeed robots/quadruped.xml`:
+    - 4096 worlds: **2.38M physics steps/s** (33 s one-time kernel compile);
+    - 16384 worlds: **4.0M physics steps/s** (compile cached: 0.7 s);
+    - all worlds converged; solver ~1.2–2.9 iterations.
+    - For comparison, CPU training runs ~50k physics steps/s effective
+      (5k env steps/s × 10 substeps).
 - M6+: switching robots at runtime (load_policy for another robot) needs the
   server to rebuild the simulation and resend the scene.
