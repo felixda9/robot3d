@@ -34,7 +34,12 @@
       </div>
       <div id="policy-box" hidden>
         <div class="policy-label">Policy</div>
+        <div class="modes" role="group" aria-label="Behavior">
+          <button id="mode-walk" title="Walk (M switches)">Walk</button>
+          <button id="mode-stand" title="Stand: stays upright in place, gets up after falls (M switches)">Stand</button>
+        </div>
         <div id="policy-name" class="policy-name"></div>
+        <div id="recovering" class="recovering" hidden>fell, getting up…</div>
         <button id="policy-toggle" title="P">Take manual control</button>
       </div>
       <div class="stats">

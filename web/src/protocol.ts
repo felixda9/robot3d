@@ -142,14 +142,27 @@ export interface FrameMessage {
   torque: number[];
 }
 
+/**
+ * What a trained policy does. walk: walks (and with a stand policy loaded,
+ * that one gets it back up after a fall, then walking resumes). stand:
+ * stays upright in place, catches shoves, gets up after falls.
+ */
+export type Mode = "walk" | "stand";
+
 /** Simulation run state. Sent on connect and whenever it changes. */
 export interface StatusMessage {
   type: "status";
   paused: boolean;
-  /** The loaded trained policy ("<run> @ <steps> steps"), or "" if none. */
-  policy: string;
-  /** True while the policy drives the motors; set_ctrl is refused then. */
+  /** The loaded walking policy ("<run> @ <steps> steps"), or "" if none. */
+  walk_policy: string;
+  /** The loaded standing policy, or "" if none. */
+  stand_policy: string;
+  /** Which policy drives while a policy drives. */
+  mode: Mode;
+  /** True while a policy drives the motors; set_ctrl is refused then. */
   policy_active: boolean;
+  /** Walk mode: the robot fell and the stand policy is getting it back up. */
+  recovering: boolean;
 }
 
 /** The server rejected a message from this client. */
@@ -205,10 +218,12 @@ export interface UsePolicyCommand {
 }
 
 /**
- * Load a checkpoint from the runs folder and let it drive (replaces any
- * loaded policy; the robot restarts standing). Names, not paths, e.g.
- * { run: "walk_10m", checkpoint: "step_009000012" }. If the run was trained
- * on another robot, the server switches to that robot and sends every
+ * Load a checkpoint from the runs folder and let it drive; the robot
+ * restarts standing. Names, not paths, e.g.
+ * { run: "walk_10m", checkpoint: "step_009000012" }. A stand-task run goes in
+ * the stand slot, anything else in the walk slot (replacing what was there),
+ * and the mode switches to it. If the run was trained on another robot, the
+ * server switches to that robot (forgetting the other slot) and sends every
  * browser a new SceneMessage.
  */
 export interface LoadPolicyCommand {
@@ -256,6 +271,12 @@ export interface PushCommand {
   force: number;
 }
 
+/** Switch between the loaded walk and stand policies (and let the policy drive). */
+export interface SetModeCommand {
+  type: "set_mode";
+  mode: Mode;
+}
+
 export type ClientMessage =
   | PlayCommand
   | PauseCommand
@@ -265,7 +286,8 @@ export type ClientMessage =
   | LoadPolicyCommand
   | GrabCommand
   | ReleaseCommand
-  | PushCommand;
+  | PushCommand
+  | SetModeCommand;
 
 // ================================================================ HTTP API
 // The training dashboard reads runs over plain HTTP (JSON), not the

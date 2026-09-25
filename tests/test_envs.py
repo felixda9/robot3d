@@ -81,9 +81,10 @@ def test_observation_ignores_position_and_heading(env):
 
 
 def reward_terms(task, vx=0.0, vy=0.0, feet_down=(1, 1, 1, 1), landed=(0, 0, 0, 0), air_time=(0, 0, 0, 0),
-                 foot_height=(0, 0, 0, 0), phase=0.0, turn_rate=0.0, fell=False, height=None, joint_offset=0.0):
+                 foot_height=(0, 0, 0, 0), phase=0.0, turn_rate=0.0, fell=False, height=None, joint_offset=0.0,
+                 up_z=1.0):
     return task.reward(
-        vx=vx, vy=vy, motor_power=0.0, action=np.zeros(8), last_action=np.zeros(8), up_z=1.0, fell=fell,
+        vx=vx, vy=vy, motor_power=0.0, action=np.zeros(8), last_action=np.zeros(8), up_z=up_z, fell=fell,
         foot_slip=0.0, feet_down=np.array(feet_down, bool), landed=np.array(landed, bool),
         air_time=np.array(air_time, float), foot_height=np.array(foot_height, float), phase=phase,
         turn_rate=turn_rate, height=task.standing_height if height is None else height,
@@ -190,6 +191,13 @@ def test_stand_task_rewards():
     assert lying["down"] == -c.down_weight
     assert lying["fall"] == 0.0  # no one-off fall penalty: the episode goes on
     assert lying["height"] < 0.35 * c.height_weight and lying["pose"] < 0.01
+    # Lying still on its back in the standing pose earns nothing for being still or posed.
+    on_back = reward_terms(stand, fell=True, height=0.08, up_z=-1.0)
+    assert on_back["tracking"] == on_back["pose"] == on_back["turn"] == 0.0
+    half = reward_terms(stand, up_z=0.5)
+    assert half["tracking"] == pytest.approx(0.5 * c.tracking_weight)
+    walking = reward_terms(WalkEnv("quadruped").task, vx=0.4, up_z=0.5)
+    assert walking["tracking"] == pytest.approx(2.0)  # walk task: not gated
     walk = reward_terms(WalkEnv("quadruped").task, fell=True, height=0.08)
     assert walk["fall"] < 0 and walk["down"] == 0.0 and walk["height"] == 0.0  # walking: unchanged
 

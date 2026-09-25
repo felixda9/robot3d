@@ -84,11 +84,17 @@ class FrameMessage(_Message):
     torque: list[float]
 
 
+Mode = Literal["walk", "stand"]
+
+
 class StatusMessage(_Message):
     type: Literal["status"] = "status"
     paused: bool
-    policy: str
+    walk_policy: str
+    stand_policy: str
+    mode: Mode
     policy_active: bool
+    recovering: bool
 
 
 class ErrorMessage(_Message):
@@ -165,6 +171,11 @@ class PushCommand(_Message):
     force: Annotated[FiniteFloat, Field(ge=0.0, le=1000.0)]
 
 
+class SetModeCommand(_Message):
+    type: Literal["set_mode"] = "set_mode"
+    mode: Mode
+
+
 ClientMessage = Annotated[
     PlayCommand
     | PauseCommand
@@ -174,7 +185,8 @@ ClientMessage = Annotated[
     | LoadPolicyCommand
     | GrabCommand
     | ReleaseCommand
-    | PushCommand,
+    | PushCommand
+    | SetModeCommand,
     Field(discriminator="type"),
 ]
 

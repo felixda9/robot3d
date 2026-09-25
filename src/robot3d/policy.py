@@ -151,3 +151,83 @@ def gait_numbers(feet_down: np.ndarray, task: WalkTask) -> dict:
         "diagonal_sync": float(np.mean(sync)) if sync else None,
         "cadence": float(touchdowns.mean() / (len(feet_down) * task.control_dt)),
     }
+
+
+class Behaviors:
+    """The robot's trained behaviors, a walker and a stand policy, with an
+    automatic switch. Drives the simulation like any controller (Simulation's
+    Controller protocol).
+
+    mode "stand": the stand policy drives (it stays up, catches shoves, and
+        gets up by itself after a fall).
+    mode "walk": the walker drives; if the robot falls and a stand policy is
+        loaded, the stand policy takes over ("recovering") until the robot
+        has stood steady for RECOVERED_SECONDS, then the walker resumes.
+    """
+
+    RECOVERED_SECONDS = 0.5
+
+    def __init__(self) -> None:
+        self.walker: PolicyController | None = None
+        self.stander: PolicyController | None = None
+        self.walk_label = ""
+        self.stand_label = ""
+        self.mode = "walk"
+        self.recovering = False
+        self._steady_steps = 0
+
+    def install(self, controller: PolicyController, label: str) -> None:
+        """Put a policy in its slot (stand policies: trained with the stand
+        task) and switch to its mode, so what you load is what you see."""
+        if controller.task.config.is_stand:
+            self.stander, self.stand_label, self.mode = controller, label, "stand"
+        else:
+            self.walker, self.walk_label, self.mode = controller, label, "walk"
+        self.reset()
+
+    def has(self, mode: str) -> bool:
+        return (self.stander if mode == "stand" else self.walker) is not None
+
+    def set_mode(self, mode: str) -> None:
+        if not self.has(mode):
+            raise ValueError(f"no {mode} policy loaded")
+        self.mode = mode
+        self.reset()
+
+    @property
+    def active(self) -> PolicyController:
+        """The policy driving right now."""
+        if self.mode == "stand" or self.recovering or self.walker is None:
+            return self.stander
+        return self.walker
+
+    # --- Controller protocol
+
+    @property
+    def decimation(self) -> int:
+        return self.active.decimation
+
+    def reset(self) -> None:
+        self.recovering = False
+        self._steady_steps = 0
+        for policy in (self.walker, self.stander):
+            if policy is not None:
+                policy.reset()
+
+    def reset_state(self, data: mujoco.MjData) -> None:
+        self.active.reset_state(data)
+
+    def act(self, data: mujoco.MjData) -> None:
+        if self.mode == "walk" and self.walker is not None and self.stander is not None:
+            task = self.walker.task
+            if not self.recovering and task.fell(data):
+                self.recovering = True  # hand over to the stand policy to get up
+                self._steady_steps = 0
+                self.stander.reset()
+            elif self.recovering:
+                steady = task.up_z(data) > 0.9 and data.qpos[2] > 0.8 * task.standing_height
+                self._steady_steps = self._steady_steps + 1 if steady else 0
+                if self._steady_steps >= round(self.RECOVERED_SECONDS / task.control_dt):
+                    self.recovering = False  # up again: walk on
+                    self.walker.reset()
+        self.active.act(data)

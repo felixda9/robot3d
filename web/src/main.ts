@@ -3,7 +3,7 @@ import { Connection, defaultSocketUrl } from "./connection";
 import { Dashboard } from "./dashboard/dashboard";
 import { RobotMouse } from "./interaction";
 import { MotorPanel } from "./motors";
-import type { ServerMessage, StatusMessage } from "./protocol";
+import type { Mode, ServerMessage, StatusMessage } from "./protocol";
 import { Viewer } from "./viewer";
 
 function element<T extends HTMLElement>(id: string): T {
@@ -24,6 +24,9 @@ const ui = {
   policyBox: element<HTMLDivElement>("policy-box"),
   policyName: element<HTMLDivElement>("policy-name"),
   policyToggle: element<HTMLButtonElement>("policy-toggle"),
+  modeWalk: element<HTMLButtonElement>("mode-walk"),
+  modeStand: element<HTMLButtonElement>("mode-stand"),
+  recovering: element<HTMLDivElement>("recovering"),
   simTime: element<HTMLSpanElement>("sim-time"),
   streamFps: element<HTMLSpanElement>("stream-fps"),
   motors: element<HTMLDivElement>("motors"),
@@ -37,7 +40,17 @@ const viewer = new Viewer(ui.viewport);
 const motors = new MotorPanel(ui.motors, (ctrl, duration) =>
   connection.send({ type: "set_ctrl", ctrl, duration }),
 );
-let status: StatusMessage = { type: "status", paused: false, policy: "", policy_active: false };
+let status: StatusMessage = {
+  type: "status",
+  paused: false,
+  walk_policy: "",
+  stand_policy: "",
+  mode: "walk",
+  policy_active: false,
+  recovering: false,
+};
+const hasPolicy = (): boolean => status.walk_policy !== "" || status.stand_policy !== "";
+const policyFor = (mode: Mode): string => (mode === "walk" ? status.walk_policy : status.stand_policy);
 new RobotMouse(viewer, (message) => connection.send(message), () => Number(ui.pushForce.value));
 let presetCount = 0;
 let framesThisSecond = 0;
@@ -91,9 +104,21 @@ function handleMessage(message: ServerMessage): void {
 function applyStatus(next: StatusMessage): void {
   status = next;
   ui.playPause.textContent = status.paused ? "Play" : "Pause";
-  ui.policyBox.hidden = status.policy === "";
+  ui.policyBox.hidden = !hasPolicy();
   ui.policyBox.classList.toggle("active", status.policy_active);
-  ui.policyName.textContent = status.policy;
+  ui.policyName.textContent = policyFor(status.mode);
+  for (const [button, mode] of [
+    [ui.modeWalk, "walk"],
+    [ui.modeStand, "stand"],
+  ] as const) {
+    button.classList.toggle("selected", status.mode === mode);
+    button.disabled = policyFor(mode) === "";
+    button.title =
+      policyFor(mode) === ""
+        ? `No ${mode} policy loaded: Watch a ${mode} run in the Training tab`
+        : `${mode === "walk" ? "Walk" : "Stand: stays upright in place, gets up after falls"} (M switches)`;
+  }
+  ui.recovering.hidden = !status.recovering;
   ui.policyToggle.textContent = status.policy_active ? "Take manual control" : "Let the policy drive";
   motors.setLocked(status.policy_active);
   updateHelp();
@@ -108,7 +133,15 @@ function reset(): void {
 }
 
 function togglePolicy(): void {
-  if (status.policy !== "") connection.send({ type: "use_policy", active: !status.policy_active });
+  if (hasPolicy()) connection.send({ type: "use_policy", active: !status.policy_active });
+}
+
+function setMode(mode: Mode): void {
+  if (policyFor(mode) !== "") connection.send({ type: "set_mode", mode });
+}
+
+function toggleMode(): void {
+  setMode(status.mode === "walk" ? "stand" : "walk");
 }
 
 function setFollow(on: boolean): void {
@@ -121,6 +154,8 @@ for (const [button, action] of [
   [ui.playPause, togglePlay],
   [ui.reset, reset],
   [ui.policyToggle, togglePolicy],
+  [ui.modeWalk, () => setMode("walk")],
+  [ui.modeStand, () => setMode("stand")],
 ] as const) {
   button.addEventListener("click", () => {
     action();
@@ -204,6 +239,8 @@ window.addEventListener("keydown", (event) => {
     setFollow(!ui.follow.checked);
   } else if (key === "p") {
     togglePolicy();
+  } else if (key === "m") {
+    toggleMode();
   } else if (/^[1-9]$/.test(key)) {
     motors.applyPreset(Number(key) - 1);
   }
@@ -211,7 +248,8 @@ window.addEventListener("keydown", (event) => {
 
 function updateHelp(): void {
   const parts = ["<kbd>Space</kbd> play/pause", "<kbd>R</kbd> reset", "<kbd>F</kbd> follow"];
-  if (status.policy !== "") parts.push("<kbd>P</kbd> policy/manual");
+  if (hasPolicy()) parts.push("<kbd>P</kbd> policy/manual");
+  if (status.walk_policy !== "" && status.stand_policy !== "") parts.push("<kbd>M</kbd> walk/stand");
   if (!status.policy_active && presetCount > 0) {
     parts.push(`<kbd>${presetCount > 1 ? `1–${Math.min(presetCount, 9)}` : "1"}</kbd> poses`);
   }

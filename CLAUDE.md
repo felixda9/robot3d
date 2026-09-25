@@ -654,6 +654,29 @@ web/                    Vite + TypeScript + three.js frontend
     unchanged. Evaluations get `upright` (share of time not fallen; a new
     dashboard column). Reward charts: "moving", "posture", "penalties";
     all-zero terms are hidden.
+- **2026-09-25: Walk / Stand modes** (user: a stand-only mode to test
+  stability, and "the two mixed so that while it's walking and I shove it,
+  it keeps upright while walking"):
+  - `policy.Behaviors` holds a walk and a stand policy and drives the sim
+    (Controller protocol). Stand mode: the stand policy. Walk mode: the
+    walker; if the robot falls (WalkTask.fell) and a stand policy is
+    loaded, the stand policy takes over (`recovering`) until the torso is
+    level (up_z > 0.9) and high (> 80% standing height) for 0.5 s, then
+    the walker resumes. The walker itself trains with shoves.
+  - Protocol: StatusMessage has `walk_policy`, `stand_policy`, `mode`,
+    `recovering` (replacing `policy`); new `set_mode {mode}` (also hands
+    control back to the policy). load_policy puts a run in its slot by
+    its task (`WalkConfig.is_stand`) and switches to that mode; switching
+    robots forgets the other slot.
+  - UI: Walk / Stand buttons in the policy box (disabled until such a
+    policy is loaded), M switches, "fell, getting up…" while recovering.
+- **2026-09-25: `stand12` (first stand run) learned to lie still**: time
+  fallen rose from 44% to 77% in the first 3M steps (10M: still 66%),
+  because "stand still" (tracking) and "standing pose" paid while lying
+  too: motionless on its back with legs in the standing pose earned 1.3
+  per step. → `posture_gating` (stand task): tracking, turn and pose are
+  multiplied by clip(up_z, 0, 1), so lying earns nothing for keeping still
+  and only getting up pays. Stopped at 10M; `stand12_gated` restarted.
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -673,10 +696,11 @@ web/                    Vite + TypeScript + three.js frontend
 - Milestone 5c (robustness): step 1 (mouse grab + push) done. Step 2: the
   12-motor robot, random shoves in training and robot switching are built
   and tested. `walk12_push` walked in circles (world-frame speed reward);
-  `walk12_straight` went straight but splayed its legs (roll). Training
-  now, side by side on the GPU: `walk12_tidy` (+ roll penalty) and
-  `stand12` (the stand task, 80M steps). Next: Stand / Walk modes in the
-  viewer with the automatic switch. Then measure how hard a shove each survives (scratchpad
+  `walk12_straight` went straight but splayed its legs (roll). Walk /
+  Stand modes with the automatic switch are built and tested. Training now,
+  side by side on the GPU: `walk12_tidy` (+ roll penalty) and
+  `stand12_gated` (the stand task, 80M steps; the first stand run learned
+  to lie still). Then measure how hard a shove each survives (scratchpad
   push_survival: 16 directions per strength) vs trot_clock_15, never
   shoved in training: 100% at 0.5 m/s, 81% at 1.0, 31% at 1.5, 12% at 2.0,
   0% from 2.5 m/s.
@@ -694,7 +718,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 124 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 126 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after

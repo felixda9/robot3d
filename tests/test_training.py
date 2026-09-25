@@ -80,6 +80,46 @@ def test_gait_numbers_tell_a_trot_from_a_run():
     assert gait_numbers(trot[:1], task)["duty_factor"] is None  # fell right away: no gait
 
 
+def test_walk_mode_hands_over_to_the_stand_policy_after_a_fall(tiny_run, tiny_stand_run):
+    import mujoco
+
+    from robot3d.policy import Behaviors
+
+    sim = Simulation("quadruped")
+    walker = PolicyController(find_checkpoint(tiny_run), sim.model)
+    stander = PolicyController(find_checkpoint(tiny_stand_run), sim.model)
+    behaviors = Behaviors()
+    behaviors.install(walker, "walker")
+    assert behaviors.mode == "walk"
+    behaviors.install(stander, "stander")
+    assert behaviors.mode == "stand"  # loading a policy switches to its mode
+    behaviors.set_mode("walk")
+    sim.set_controller(behaviors)  # restarts standing
+
+    def knock_over():
+        sim.data.qpos[3:7] = [0, 1, 0, 0]  # upside down
+        mujoco.mj_forward(sim.model, sim.data)
+
+    behaviors.act(sim.data)
+    assert behaviors.active is walker and not behaviors.recovering
+    knock_over()
+    behaviors.act(sim.data)
+    assert behaviors.recovering and behaviors.active is stander  # the stand policy gets it up
+    walker.reset_state(sim.data)  # (placed back on its feet)
+    for _ in range(24):  # 0.48 s standing steady: not yet
+        behaviors.act(sim.data)
+    assert behaviors.recovering
+    behaviors.act(sim.data)  # 0.5 s: walk on
+    assert behaviors.active is walker and not behaviors.recovering
+
+    behaviors.set_mode("stand")
+    knock_over()
+    behaviors.act(sim.data)
+    assert behaviors.active is stander and not behaviors.recovering  # stand mode: it's the stand policy's job anyway
+    with pytest.raises(ValueError, match="no stand policy"):
+        Behaviors().set_mode("stand")
+
+
 def test_policy_drives_a_live_simulation(tiny_run):
     sim = Simulation("quadruped")
     controller = PolicyController(find_checkpoint(tiny_run), sim.model)

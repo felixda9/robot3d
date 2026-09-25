@@ -150,7 +150,7 @@ def test_bad_messages_get_an_error_reply(client):
 def test_without_a_policy(client):
     with client.websocket_connect("/ws") as ws:
         status = receive_until(ws, "status")
-        assert status.policy == "" and status.policy_active is False
+        assert status.walk_policy == "" and status.policy_active is False
         ws.send_json({"type": "use_policy", "active": True})
         assert "no policy loaded" in receive_until(ws, "error").message
 
@@ -160,7 +160,7 @@ def test_policy_drives_and_can_be_switched_off(tiny_run):
         with client.websocket_connect("/ws") as ws:
             scene = receive(ws)
             status = receive(ws)
-            assert status.policy.startswith("tiny @ ") and status.policy_active is True
+            assert status.walk_policy.startswith("tiny @ ") and status.policy_active is True
             # Starts standing (as in training), not dropped from 0.4 m.
             torso_z = receive_until(ws, "frame").xpos[2]
             assert torso_z == pytest.approx(0.26, abs=0.02)
@@ -204,12 +204,12 @@ def test_dashboard_api(tiny_run):
 def test_load_policy_over_websocket(tiny_run):
     with TestClient(create_app("quadruped", runs_dir=tiny_run.parent)) as client:
         with client.websocket_connect("/ws") as ws:
-            assert receive_until(ws, "status").policy == ""
+            assert receive_until(ws, "status").walk_policy == ""
             first = client.get("/api/runs/tiny").json()["checkpoints"][0]["name"]
 
             ws.send_json({"type": "load_policy", "run": "tiny", "checkpoint": first})
-            status = receive_until(ws, "status", lambda s: s.policy != "")
-            assert status.policy.startswith("tiny @ ") and status.policy_active is True
+            status = receive_until(ws, "status", lambda s: s.walk_policy != "")
+            assert status.walk_policy.startswith("tiny @ ") and status.policy_active is True
 
             ws.send_json({"type": "load_policy", "run": "tiny", "checkpoint": "step_999999999"})
             assert "no checkpoint" in receive_until(ws, "error").message
@@ -291,13 +291,43 @@ def test_watching_another_robots_policy_switches_the_robot(tiny_run12):
             ws.send_json({"type": "load_policy", "run": "tiny12", "checkpoint": checkpoint})
             scene = receive_until(ws, "scene")
             assert scene.robot == "quadruped12" and len(scene.actuators) == 12
-            status = receive_until(ws, "status", lambda s: s.policy != "")
-            assert status.policy.startswith("tiny12 @ ") and status.policy_active
+            status = receive_until(ws, "status", lambda s: s.walk_policy != "")
+            assert status.walk_policy.startswith("tiny12 @ ") and status.policy_active
             frame = receive_until(ws, "frame")
             assert len(frame.ctrl) == 12
         # A browser connecting now gets the new robot straight away.
         with client.websocket_connect("/ws") as ws:
             assert receive_until(ws, "scene").robot == "quadruped12"
+
+
+def test_walk_and_stand_modes(tiny_run, tiny_stand_run, tmp_path):
+    import shutil
+
+    for run in (tiny_run, tiny_stand_run):
+        shutil.copytree(run, tmp_path / run.name)
+    with TestClient(create_app("quadruped", runs_dir=tmp_path)) as client:
+        with client.websocket_connect("/ws") as ws:
+            status = receive_until(ws, "status")
+            assert (status.walk_policy, status.stand_policy, status.recovering) == ("", "", False)
+            ws.send_json({"type": "set_mode", "mode": "stand"})
+            assert "no stand policy" in receive_until(ws, "error").message
+
+            def load(run):
+                checkpoint = client.get(f"/api/runs/{run}").json()["checkpoints"][0]["name"]
+                ws.send_json({"type": "load_policy", "run": run, "checkpoint": checkpoint})
+
+            load("tiny")
+            status = receive_until(ws, "status", lambda s: s.walk_policy != "")
+            assert status.mode == "walk" and status.stand_policy == "" and status.policy_active
+            load("tiny_stand")
+            status = receive_until(ws, "status", lambda s: s.stand_policy != "")
+            assert status.mode == "stand" and status.walk_policy.startswith("tiny @ ")
+
+            ws.send_json({"type": "use_policy", "active": False})  # manual control ...
+            receive_until(ws, "status", lambda s: not s.policy_active)
+            ws.send_json({"type": "set_mode", "mode": "walk"})  # ... picking a mode hands it back
+            status = receive_until(ws, "status", lambda s: s.mode == "walk")
+            assert status.policy_active
 
 
 def test_root_page_responds(client):

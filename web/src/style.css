@@ -117,6 +117,27 @@ body {
   color: var(--accent);
 }
 
+.modes {
+  display: flex;
+  gap: 4px;
+}
+
+.modes button {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.modes button.selected {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.recovering {
+  font-size: 12px;
+  color: var(--accent);
+}
+
 /* ------------------------------------------------------------ motor panel */
 
 #motors {

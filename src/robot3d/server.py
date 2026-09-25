@@ -49,6 +49,7 @@ from robot3d.protocol import (
     RunSummary,
     ScalarsResponse,
     SetCtrlCommand,
+    SetModeCommand,
     StatusMessage,
     UsePolicyCommand,
     client_message_adapter,
@@ -66,6 +67,7 @@ from robot3d.runs import (
     run_summary,
     save_evaluation,
 )
+from robot3d.policy import Behaviors  # (policy.py imports PyTorch only when loading a checkpoint)
 from robot3d.scene import SceneEncoder
 from robot3d.simulation import Controller, Simulation
 
@@ -156,9 +158,9 @@ class EvaluationQueue:
 class SimRunner:
     """Owns the Simulation and advances it on a dedicated thread."""
 
-    def __init__(self, sim: Simulation, fps: int = FPS, policy_label: str = ""):
+    def __init__(self, sim: Simulation, fps: int = FPS, behaviors: Behaviors | None = None):
         self.sim = sim
-        self.policy_label = policy_label
+        self.behaviors = behaviors or Behaviors()  # the loaded walk/stand policies (sim.controller once one is)
         self.frame_dt = 1.0 / fps
         self._encoder = SceneEncoder(sim.model, sim.robot)
         # Plain str attributes: reading them from another thread is safe, since
@@ -239,6 +241,10 @@ class SimRunner:
                     case UsePolicyCommand(active=active):
                         self.sim.use_controller(active)
                         state_changed = True
+                    case SetModeCommand(mode=mode):
+                        self.behaviors.set_mode(mode)
+                        self.sim.use_controller(True)  # picking a mode = let that policy drive
+                        state_changed = True
                     case GrabCommand(geom=geom, point=point, target=target):
                         self.sim.grab(geom, point, target)
                     case ReleaseCommand():
@@ -248,8 +254,8 @@ class SimRunner:
                     case InstallPolicy(controller=controller, label=label, sim=new_sim):
                         if new_sim is not None:
                             self._switch_robot(new_sim)
-                        self.sim.set_controller(controller)  # drives now; robot restarts standing
-                        self.policy_label = label
+                        self.behaviors.install(controller, label)
+                        self.sim.set_controller(self.behaviors)  # drives now; robot restarts standing
                         state_changed = True
             except (ValueError, RuntimeError) as e:
                 # Checked on the event loop already; this only catches races,
@@ -261,6 +267,7 @@ class SimRunner:
         """Simulate another robot from now on; every browser gets its scene."""
         sim.paused = self.sim.paused
         self.sim = sim
+        self.behaviors = Behaviors()  # the old robot's policies don't fit this one
         self._encoder = SceneEncoder(sim.model, sim.robot)
         self.scene_json = self._encoder.scene(sim.data).model_dump_json()
         if self._publish is not None:
@@ -270,10 +277,14 @@ class SimRunner:
         return self._encoder.frame(self.sim.data).model_dump_json()
 
     def _status_json(self) -> str:
+        b = self.behaviors
         return StatusMessage(
             paused=self.sim.paused,
-            policy=self.policy_label,
+            walk_policy=b.walk_label,
+            stand_policy=b.stand_label,
+            mode=b.mode,
             policy_active=self.sim.controller_active,
+            recovering=b.recovering and self.sim.controller_active,
         ).model_dump_json()
 
 
@@ -312,10 +323,11 @@ class Client:
             pass  # connection closed; the receive loop cleans up
 
 
-def _refusal(command: ClientMessage, sim: Simulation) -> str | None:
+def _refusal(command: ClientMessage, runner: SimRunner) -> str | None:
     """Why a well-formed command can't be applied, or None. Checked on the
     event loop, where we can still answer the sender (the sim thread doesn't
     know who sent a command)."""
+    sim = runner.sim
     match command:
         case SetCtrlCommand():
             if sim.controller_active:
@@ -325,6 +337,8 @@ def _refusal(command: ClientMessage, sim: Simulation) -> str | None:
                 return f"unknown actuator(s): {', '.join(unknown)}"
         case UsePolicyCommand(active=True) if sim.controller is None:
             return "no policy loaded (start the server with --policy <run folder or checkpoint>)"
+        case SetModeCommand(mode=mode) if not runner.behaviors.has(mode):
+            return f"no {mode} policy loaded (Watch a {mode} run in the Training tab)"
         case GrabCommand() | PushCommand():
             model = sim.model
             if command.geom >= model.ngeom:
@@ -345,13 +359,13 @@ def create_app(
     """`policy`: a run folder (-> newest checkpoint) or checkpoint .zip to drive
     the robot. `runs_dir`: where the dashboard finds training runs."""
     sim = Simulation(robot, keyframe)
-    policy_label = ""
+    behaviors = Behaviors()
     if policy is not None:
         install = load_policy(find_checkpoint(policy), sim)
         sim = install.sim or sim
-        sim.set_controller(install.controller)
-        policy_label = install.label
-    runner = SimRunner(sim, policy_label=policy_label)
+        behaviors.install(install.controller, install.label)
+        sim.set_controller(behaviors)
+    runner = SimRunner(sim, behaviors=behaviors)
     evaluations = EvaluationQueue()
     scalars = ScalarReader()
     clients: set[Client] = set()  # only touched on the event loop thread
@@ -461,7 +475,7 @@ def create_app(
                     detail = f"{error['msg']} at {'.'.join(map(str, error['loc'])) or 'top level'}"
                     client.send_message(ErrorMessage(message=f"invalid message: {detail}").model_dump_json())
                     continue
-                problem = _refusal(command, runner.sim)
+                problem = _refusal(command, runner)
                 if problem is None and isinstance(command, LoadPolicyCommand):
                     problem = await load_policy_command(command)
                 elif problem is None:

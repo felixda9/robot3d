@@ -81,6 +81,12 @@ class WalkConfig:
     pose_weight: float = 0.0  # x exp(-sum of (joint angle - home angle)^2 / pose_sigma): back in the standing pose
     pose_sigma: float = 1.0  # rad^2
     down_weight: float = 0.0  # penalty for every step spent fallen (with terminate_on_fall off)
+    # Pay "stand still" (tracking), "don't turn" and "standing pose" only in
+    # proportion to how upright the torso is (0 on its side or back). Without
+    # it, stand12 learned that lying motionless on its back with its legs in
+    # the standing pose earns 1.3 per step: a trap that made getting up look
+    # costly. Only matters when falls don't end the episode.
+    posture_gating: bool = False
 
     # --- falling: tilted more than 60 degrees, or torso below half its standing height
     min_up_z: float = 0.5
@@ -123,6 +129,7 @@ class WalkConfig:
             height_weight=1.0,
             pose_weight=0.5,
             down_weight=1.0,
+            posture_gating=True,
             fall_penalty=0.0,
             terminate_on_fall=False,
             fallen_start_fraction=0.5,
@@ -309,6 +316,7 @@ class WalkTask:
         phase: the gait clock at the end of the step (gait_phase()).
         """
         c = self.config
+        upright = min(max(up_z, 0.0), 1.0) if c.posture_gating else 1.0  # see WalkConfig.posture_gating
         gait = clearance = 0.0
         if self.clock:
             should_be_down = self.desired_down(phase)
@@ -320,21 +328,21 @@ class WalkTask:
         extra_air = np.clip(air_time - c.air_time_target, -c.air_time_target, 0.3)  # capped: no endless lifts
         diagonal_sync = [float(feet_down[a] == feet_down[b]) for a, b in self.diagonal_pairs]
         terms = {
-            "tracking": c.tracking_weight * float(np.exp(-speed_error_sq / c.tracking_sigma)),
+            "tracking": c.tracking_weight * upright * float(np.exp(-speed_error_sq / c.tracking_sigma)),
             "forward": c.forward_weight * min(float(vx), c.max_reward_speed),
             "upright": c.upright_weight * up_z,
             "trot": c.trot_weight * (float(np.mean(diagonal_sync)) if diagonal_sync else 0.0),
             "air_time": c.air_time_weight * float(np.sum(np.where(landed, extra_air, 0.0))),
             "gait": c.gait_weight * gait,
             "clearance": c.clearance_weight * clearance,
-            "turn": c.turn_weight * math.exp(-(turn_rate**2) / c.turn_sigma),
+            "turn": c.turn_weight * upright * math.exp(-(turn_rate**2) / c.turn_sigma),
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * float(np.sum((action - last_action) ** 2)),
             "slip": -c.slip_weight * foot_slip,
             "support": -c.support_weight * float(np.sum(feet_down) < 2),
             "fall": -c.fall_penalty if fell and c.terminate_on_fall else 0.0,
             "height": c.height_weight * min(max(height / self.standing_height, 0.0), 1.0),
-            "pose": c.pose_weight * math.exp(-float(np.sum(joint_offset**2)) / c.pose_sigma),
+            "pose": c.pose_weight * upright * math.exp(-float(np.sum(joint_offset**2)) / c.pose_sigma),
             "down": -c.down_weight * float(fell),
             "roll": -c.roll_weight * float(np.sum(joint_offset[self.roll_motors] ** 2)),
         }
