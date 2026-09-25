@@ -12,6 +12,8 @@ free-floating torso, every motor is a position actuator on a joint, and a
 
 from dataclasses import asdict, dataclass, fields
 
+import math
+
 import mujoco
 import numpy as np
 
@@ -31,6 +33,15 @@ class WalkConfig:
     # (trot_rsl used 0.25, so loose that it settled at 0.31 m/s for 97%.)
     tracking_sigma: float = 0.1
     support_weight: float = 1.0  # penalty for each step with fewer than 2 feet down (no running/hopping)
+    # Which way "forward" is for the speed reward. "body": along the robot's
+    # own heading (where its nose points, flattened onto the ground), so the
+    # reward only depends on what the policy can sense; it never observes its
+    # heading. "world": along world +x (runs before 5c). With "world", the
+    # 12-motor walk12_push learned to walk in circles: it couldn't tell why its
+    # reward kept changing.
+    velocity_frame: str = "body"
+    turn_weight: float = 0.5  # x exp(-turn_rate^2 / turn_sigma): walk straight, don't turn
+    turn_sigma: float = 0.25  # (rad/s)^2 (legged_gym's value); turning at 10 deg/s -> 88% of it, 30 deg/s -> 33%
 
     # Gait clock (since trot_clock): a built-in rhythm, like a metronome for the
     # legs. The policy sees the clock's phase and is rewarded when each foot is
@@ -94,6 +105,8 @@ class WalkConfig:
             "gait_weight": 0.0,
             "clearance_weight": 0.0,
             "push_interval": 0.0,
+            "velocity_frame": "world",
+            "turn_weight": 0.0,
         }
         unknown = sorted(set(saved) - {f.name for f in fields(cls)})
         if unknown:
@@ -229,10 +242,13 @@ class WalkTask:
         air_time: np.ndarray,
         foot_height: np.ndarray,
         phase: float,
+        turn_rate: float,
     ) -> tuple[float, dict[str, float]]:
         """Reward for one control step, plus each term separately (for logging).
 
-        vx, vy: torso velocity over the step (world frame), m/s.
+        vx, vy: torso velocity over the step, forward and sideways (see
+            heading_velocity()), m/s.
+        turn_rate: how fast the torso turns about its own up axis, rad/s.
         foot_slip: sum over planted feet of (sliding speed)^2, see foot_slip().
         feet_down: which feet are on the ground (bool per foot).
         landed, air_time: which feet touched down this step, and how long each
@@ -259,6 +275,7 @@ class WalkTask:
             "air_time": c.air_time_weight * float(np.sum(np.where(landed, extra_air, 0.0))),
             "gait": c.gait_weight * gait,
             "clearance": c.clearance_weight * clearance,
+            "turn": c.turn_weight * math.exp(-(turn_rate**2) / c.turn_sigma),
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * float(np.sum((action - last_action) ** 2)),
             "slip": -c.slip_weight * foot_slip,
@@ -279,6 +296,28 @@ class WalkTask:
     # ----------------------------------------------------------------- feet
 
     FOOT_CONTACT_MARGIN = 0.005  # m
+
+    # -------------------------------------------------------------- motion
+
+    def heading_velocity(self, data: mujoco.MjData, vx: float, vy: float) -> tuple[float, float]:
+        """World-frame horizontal velocity -> (forward, sideways) for the reward.
+
+        velocity_frame "body": relative to the robot's heading, the direction
+        its torso's x axis points, flattened onto the ground (so tilting
+        doesn't change it). "world": unchanged.
+        """
+        if self.config.velocity_frame == "world":
+            return vx, vy
+        nose = data.xmat[1].reshape(3, 3)[:, 0]  # torso x axis in world coordinates
+        heading = math.atan2(nose[1], nose[0])
+        c, s = math.cos(heading), math.sin(heading)
+        return c * vx + s * vy, -s * vx + c * vy
+
+    @staticmethod
+    def turn_rate(data: mujoco.MjData) -> float:
+        """Turning speed about the torso's up axis, rad/s (free joint: qvel[3:6]
+        is the angular velocity in the torso's own frame)."""
+        return float(data.qvel[5])
 
     def feet_state(self, data: mujoco.MjData) -> tuple[np.ndarray, np.ndarray]:
         """(x/y position of each foot, whether each foot is on the ground)."""

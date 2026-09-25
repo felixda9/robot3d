@@ -107,6 +107,7 @@ def test_action_to_ctrl_and_reward_match(snapshots):
         "feet_down": rng.random((N, nfeet)) < 0.6, "landed": rng.random((N, nfeet)) < 0.3,
         "air_time": rng.uniform(0, 0.8, (N, nfeet)), "foot_height": rng.uniform(-0.001, 0.06, (N, nfeet)),
         "phase": np.array([task.gait_phase(int(s)) for s in rng.integers(0, 1000, N)]),
+        "turn_rate": rng.uniform(-2, 2, N),
     }
     booleans = ("fell", "feet_down", "landed")
     dtypes = {k: torch.bool for k in booleans} | {"phase": torch.float64}
@@ -118,6 +119,20 @@ def test_action_to_ctrl_and_reward_match(snapshots):
         assert set(t) == set(terms)
         for name, value in t.items():
             assert terms[name][i].item() == pytest.approx(value, rel=1e-5, abs=1e-5), name
+
+
+def test_heading_velocity_matches(snapshots):
+    task, rows = snapshots
+    batched = BatchedWalkTask(task, "cpu")
+    rng = np.random.default_rng(3)
+    vx, vy = rng.uniform(-1, 1, N), rng.uniform(-1, 1, N)
+    got = batched.heading_velocity(stack(rows, "after", "rot"), torch.tensor(vx, dtype=torch.float32),
+                                   torch.tensor(vy, dtype=torch.float32))
+    data = mujoco.MjData(task.model)
+    for i, row in enumerate(rows):
+        data.xmat[1] = row["after"]["rot"].reshape(9)
+        expected = task.heading_velocity(data, vx[i], vy[i])
+        assert (got[0][i].item(), got[1][i].item()) == pytest.approx(expected, abs=1e-5)
 
 
 def test_gait_clock_matches_exactly(snapshots):

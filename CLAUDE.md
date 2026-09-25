@@ -604,6 +604,23 @@ web/                    Vite + TypeScript + three.js frontend
   of that robot (off the sim thread), the sim thread swaps it in and
   broadcasts the new SceneMessage; the viewer and motor panel rebuild.
   (Was: an error "trained on robot X, but this server simulates Y".)
+- **2026-09-25: `walk12_push` walked in circles** (user watching it
+  mid-training): at 30M steps −28 °/s, a full circle every ~13 s, in every
+  episode; 0.28 m/s along its nose, 0.19 m/s along world +x. Cause: the
+  speed reward was along world +x, but the policy never observes its
+  heading, so after shoves (and with roll joints that make turning easy)
+  its reward changed for reasons it couldn't sense. (The 8-motor walkers
+  turn with difficulty and went straight on their own: trot_clock_15
+  drifts < 1° in 20 s.) Stopped at ~30M; kept as a record.
+- **2026-09-25: Speed in the robot's heading frame + a turn reward** (the
+  legged_gym standard, and the interface M7's commands will use):
+  - `velocity_frame` "body": forward/sideways speed relative to the torso's
+    heading (its x axis flattened onto the ground); "world" for older runs.
+  - `turn` = 0.5 × exp(−turn_rate² / 0.25), turn_rate = torso angular
+    velocity about its own z (qvel[5]): 10 °/s keeps 88%, 30 °/s 33%.
+  - Consequence: after a shove turns it, the robot walks straight in its
+    new direction; steering back needs a heading target (M7 commands).
+  - Episode distance/speed stay along world +x (robots start facing +x).
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -622,9 +639,12 @@ web/                    Vite + TypeScript + three.js frontend
   1.5 Hz one (`trot_clock_15`, ~27 cm strides): now the default gait.
 - Milestone 5c (robustness): step 1 (mouse grab + push) done. Step 2: the
   12-motor robot, random shoves in training and robot switching are built
-  and tested; `walk12_push` (quadruped12, 1.5 Hz trot-walk, shoves) is
-  training. Then: measure how hard a push it survives, vs trot_clock_15
-  (never shoved in training).
+  and tested. `walk12_push` walked in circles (world-frame speed reward);
+  fixed with heading-frame speed + a turn reward, `walk12_straight` is
+  training. Then: measure how hard a shove it survives (scratchpad
+  push_survival: 16 directions per strength) vs trot_clock_15, never
+  shoved in training: 100% at 0.5 m/s, 81% at 1.0, 31% at 1.5, 12% at 2.0,
+  0% from 2.5 m/s.
 - `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
   - 0 KL spikes (walk_10m: 114, max 50.5);
   - steady 1.0–1.28 m/s after 3M steps;
@@ -639,7 +659,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 115 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 117 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after

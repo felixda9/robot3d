@@ -81,11 +81,12 @@ def test_observation_ignores_position_and_heading(env):
 
 
 def reward_terms(task, vx=0.0, vy=0.0, feet_down=(1, 1, 1, 1), landed=(0, 0, 0, 0), air_time=(0, 0, 0, 0),
-                 foot_height=(0, 0, 0, 0), phase=0.0):
+                 foot_height=(0, 0, 0, 0), phase=0.0, turn_rate=0.0):
     return task.reward(
         vx=vx, vy=vy, motor_power=0.0, action=np.zeros(8), last_action=np.zeros(8), up_z=1.0, fell=False,
         foot_slip=0.0, feet_down=np.array(feet_down, bool), landed=np.array(landed, bool),
         air_time=np.array(air_time, float), foot_height=np.array(foot_height, float), phase=phase,
+        turn_rate=turn_rate,
     )[1]
 
 
@@ -155,6 +156,25 @@ def test_gait_clock_in_observations(env):
     assert obs[-2:].tolist() == pytest.approx([np.sin(angle), np.cos(angle)], abs=1e-6)
 
 
+def test_speed_is_measured_along_the_robots_heading(env):
+    """The policy can't see which way it faces, so the reward mustn't depend on it."""
+    from robot3d.walk import WalkConfig, WalkTask
+
+    env.reset(seed=0)
+    env.data.qpos[3:7] = [np.cos(np.pi / 4), 0, 0, np.sin(np.pi / 4)]  # turned 90 deg left: nose along +y
+    mujoco.mj_forward(env.model, env.data)
+    forward, sideways = env.task.heading_velocity(env.data, 0.0, 0.4)  # moving along world +y
+    assert (forward, sideways) == pytest.approx((0.4, 0.0), abs=1e-9)
+    world = WalkTask(env.model, WalkConfig(velocity_frame="world"))  # runs before 5c
+    assert world.heading_velocity(env.data, 0.0, 0.4) == (0.0, 0.4)
+
+    c = env.task.config
+    straight = reward_terms(env.task, turn_rate=0.0)["turn"]
+    assert straight == pytest.approx(c.turn_weight)
+    assert reward_terms(env.task, turn_rate=np.radians(30))["turn"] == pytest.approx(0.33 * c.turn_weight, abs=0.01)
+    assert reward_terms(env.task, turn_rate=-1.0)["turn"] < 0.1 * straight  # circling fast
+
+
 def test_random_shoves(env):
     from robot3d.walk import WalkConfig
 
@@ -193,7 +213,7 @@ def test_first_task_runs_keep_their_reward():
 
     # run.json of the first task (walk_10m etc.) saved forward_weight=1.0 and no walk terms
     newer = ("tracking_weight", "support_weight", "trot_weight", "air_time_weight",
-             "gait_frequency", "gait_weight", "clearance_weight", "push_interval")
+             "gait_frequency", "gait_weight", "clearance_weight", "push_interval", "velocity_frame", "turn_weight")
     saved = {k: v for k, v in WalkConfig().to_dict().items() if k not in newer}
     saved["forward_weight"] = 1.0
     old = WalkConfig.from_run(saved)
@@ -201,6 +221,7 @@ def test_first_task_runs_keep_their_reward():
         1.0, 0.0, 0.0, 0.0, 0.0)
     assert (old.gait_frequency, old.gait_weight, old.clearance_weight) == (0.0, 0.0, 0.0)
     assert old.push_interval == 0.0  # no shoves either
+    assert (old.velocity_frame, old.turn_weight) == ("world", 0.0)  # speed along world +x, no turn term
 
 
 def test_runs_before_the_clock_keep_their_observation(env):

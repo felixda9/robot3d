@@ -83,7 +83,7 @@ interface TermChart extends ChartOptions {
 
 const TERM_CHARTS: TermChart[] = [
   {
-    terms: ["tracking", "forward", "upright", "gait", "clearance", "trot", "air_time"],
+    terms: ["tracking", "forward", "upright", "gait", "clearance", "turn", "trot", "air_time"],
     title: "Rewards (+)",
     subtitle: "What the selected run is rewarded for, average per step.",
     format: fixed(3),

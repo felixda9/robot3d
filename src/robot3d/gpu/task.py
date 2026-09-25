@@ -109,6 +109,7 @@ class BatchedWalkTask:
         air_time: torch.Tensor,
         foot_height: torch.Tensor,
         phase: torch.Tensor,
+        turn_rate: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """(N,) rewards and (N,) per-term values, same terms as WalkTask.reward.
         feet_down, landed: (N, feet) bool; air_time, foot_height: (N, feet);
@@ -136,6 +137,7 @@ class BatchedWalkTask:
             "air_time": c.air_time_weight * torch.where(landed, extra_air, torch.zeros_like(extra_air)).sum(dim=1),
             "gait": c.gait_weight * gait,
             "clearance": c.clearance_weight * clearance,
+            "turn": c.turn_weight * torch.exp(-(turn_rate**2) / c.turn_sigma),
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * ((action - last_action) ** 2).sum(dim=1),
             "slip": -c.slip_weight * foot_slip,
@@ -165,6 +167,18 @@ class BatchedWalkTask:
         pos = geom_xpos[:, self.feet]
         on_ground = pos[..., 2] - self.foot_radius < WalkTask.FOOT_CONTACT_MARGIN
         return pos[..., :2].clone(), on_ground
+
+    def heading_velocity(self, torso_rot: torch.Tensor, vx: torch.Tensor, vy: torch.Tensor):
+        """Same as WalkTask.heading_velocity, for (N,) velocities and (N, 3, 3) rotations."""
+        if self.config.velocity_frame == "world":
+            return vx, vy
+        heading = torch.atan2(torso_rot[:, 1, 0], torso_rot[:, 0, 0])
+        c, s = heading.cos(), heading.sin()
+        return c * vx + s * vy, -s * vx + c * vy
+
+    @staticmethod
+    def turn_rate(qvel: torch.Tensor) -> torch.Tensor:
+        return qvel[:, 5]
 
     def foot_heights(self, geom_xpos: torch.Tensor) -> torch.Tensor:
         """(N, feet) each foot's lowest point above the floor."""

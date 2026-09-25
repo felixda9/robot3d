@@ -197,12 +197,14 @@ class GpuWalkEnv:
         landed, air_at_landing, self.air_time = task.air_time_update(self._feet_before[1], self.air_time, feet_down)
         torso_rot = self.xmat[:, 1]
         fell = task.fell(self.qpos, torso_rot)
+        vx, vy = task.heading_velocity(torso_rot, vx, vy)
         reward, terms = task.reward(
             vx=vx, vy=vy, motor_power=power, action=actions, last_action=self.last_action,
             up_z=task.up_z(torso_rot), fell=fell, foot_slip=foot_slip,
             feet_down=feet_down, landed=landed, air_time=air_at_landing,
             foot_height=task.foot_heights(self.geom_xpos),
             phase=task.gait_phase(self.episode_length + 1),  # the clock after this step
+            turn_rate=task.turn_rate(self.qvel),
         )
         self.last_action = actions
         self.episode_length += 1

@@ -77,6 +77,7 @@ class WalkEnv(gym.Env):
         # Average speed over the step (smoother than the instantaneous velocity).
         forward_velocity = (data.qpos[0] - x_before) / task.control_dt
         lateral_velocity = (data.qpos[1] - y_before) / task.control_dt
+        vx, vy = task.heading_velocity(data, forward_velocity, lateral_velocity)
         feet_after = task.feet_state(data)
         foot_slip = task.foot_slip(feet_before, feet_after)
         feet_down = feet_after[1]
@@ -86,10 +87,11 @@ class WalkEnv(gym.Env):
         up_z = task.up_z(data)
         fell = task.fell(data)
         reward, terms = task.reward(
-            vx=forward_velocity, vy=lateral_velocity, motor_power=power, action=action,
+            vx=vx, vy=vy, motor_power=power, action=action,
             last_action=self._last_action, up_z=up_z, fell=fell, foot_slip=foot_slip,
             feet_down=feet_down, landed=landed, air_time=air_time,
             foot_height=task.foot_heights(data), phase=task.gait_phase(self._steps + 1),  # the clock after this step
+            turn_rate=task.turn_rate(data),
         )
         self._last_action = action
         self._steps += 1
