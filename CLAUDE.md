@@ -30,12 +30,21 @@ MuJoCo is the physics engine; everything around it is built here.
   environments, and training (Stable-Baselines3, starting with PPO).
 - **The browser frontend (three.js) is only a viewer and controller.** It never
   simulates physics.
-- **Protocol (WebSocket, FastAPI):**
+- **Protocol (WebSocket at `/ws`, FastAPI):**
   - On connect, the backend sends the static scene once: for each geom, its type,
     size, color (rgba), and parent body.
   - Then it streams each frame's geom positions and rotation matrices
     (MuJoCo's `data.geom_xpos` and `data.geom_xmat`) at ~60 fps.
   - The frontend sends commands back (play/pause/reset, later motor targets).
+  - **`web/src/protocol.ts` is the single source of truth for every message.**
+    `src/robot3d/protocol.py` mirrors it with Pydantic models (same names and
+    fields, snake_case on the wire). `tests/test_protocol.py` generates a JSON
+    Schema from the TS file and fails if the Python models differ. **Adding or
+    changing a message: edit both files, then run `uv run pytest`.**
+- **Dev setup:** the Vite dev server (port 5173) serves the page and proxies
+  `/ws` to the backend (port 8000), so the page always connects to
+  `ws://<its own host>/ws`. In production, `npm run build` writes `web/dist/`,
+  which the backend serves itself at port 8000.
 - **Robots are data, not code:** each robot is an MJCF file in `robots/` (later
   generated from a simpler YAML/JSON spec). **Only primitive shapes** (capsule,
   box, sphere; plane for the ground). No meshes, so rendering stays simple.
@@ -56,19 +65,38 @@ MuJoCo is the physics engine; everything around it is built here.
 
 ## Environment
 
-- Windows 10, NVIDIA RTX 3090 (24 GB), Python 3.12, managed with **uv**.
-- Commands:
-  - `uv sync`: create `.venv` and install everything
-  - `uv run pytest`: run tests (headless physics checks)
+- Windows 10, NVIDIA RTX 3090 (24 GB), Python 3.12 managed with **uv**;
+  Node 24 + npm for the frontend (Vite 8, TypeScript 7, three.js 0.186).
+- Commands (from the repo root unless noted):
+  - `uv sync` and `cd web; npm install`: install everything
+  - `uv run pytest`: all tests (physics, real-time loop, server over a real
+    WebSocket, TS↔Python protocol contract; the contract test needs `web/node_modules`)
   - `uv run scripts/view_mujoco.py`: MuJoCo's built-in viewer
+  - `uv run scripts/serve.py`: simulation server on http://localhost:8000
+  - `cd web; npm run dev`: frontend dev server on http://localhost:5173
+    (start the backend too)
+  - `cd web; npm run build`: type-check (`tsc`) + production build to `web/dist/`
+  - `cd web; npm run typecheck`: type-check only
 
 ## Layout
 
 ```
-robots/            MJCF robot files (data, not code)
-src/robot3d/       Python package (sim helpers; later server, envs, training)
-scripts/           Entry-point scripts (viewer, later training/eval)
-tests/             pytest, headless physics sanity checks
+robots/                 MJCF robot files (data, not code)
+src/robot3d/
+  robots.py             load_model(), reset_to_keyframe()
+  simulation.py         Simulation: model + state + real-time pacing (shared loop)
+  scene.py              MuJoCo model/state -> SceneMessage / FrameMessage
+  protocol.py           Pydantic mirror of web/src/protocol.ts
+  server.py             FastAPI app: sim thread, WebSocket, static files
+scripts/                view_mujoco.py, serve.py (later: training/eval)
+tests/                  pytest
+web/                    Vite + TypeScript + three.js frontend
+  src/protocol.ts       ALL WebSocket message types (single source of truth)
+  src/connection.ts     WebSocket with auto-reconnect
+  src/viewer.ts         three.js scene: camera, lights, ground, sky, geoms
+  src/geoms.ts          MuJoCo geom -> three.js mesh, pose helpers
+  src/main.ts           wiring + UI (buttons, stats)
+  vite.config.ts        dev server + /ws proxy
 ```
 
 ## Milestones
@@ -78,7 +106,7 @@ tests/             pytest, headless physics sanity checks
   motors) on a ground plane. A script that shows it in MuJoCo's built-in viewer.
   *Success = the robot drops onto the floor and settles without jittering or
   exploding.*
-- [ ] **2. Web viewer:** FastAPI WebSocket server runs the simulation in real
+- [x] **2. Web viewer:** FastAPI WebSocket server runs the simulation in real
   time; a three.js page renders it with an orbit camera, shadows, a ground grid,
   and play/pause/reset buttons. *Success = the web view matches MuJoCo's viewer.*
 - [ ] **3. Manual control:** one slider per motor in the web UI plus a few
@@ -132,25 +160,66 @@ tests/             pytest, headless physics sanity checks
 - **2026-09-24: No self-collision:** robot geoms use contype=1/conaffinity=0,
   so they collide with world geoms (default 1/1) but not each other. Revisit
   if the legs visibly pass through each other in gaits.
-- **2026-09-24: Real-time loop (reused in M2):** the script steps physics
-  itself, anchored to a (wall time, sim time) pair; each 60 fps frame steps
-  until sim time catches up, capped at 50 steps per frame, then resyncs. The
-  MuJoCo *passive* viewer only draws. It applies its own Backspace/Reset
-  inside `viewer.sync()` (reset to qpos0), so the script detects
-  time-going-backwards after `sync()` and resets to the keyframe instead.
+- **2026-09-24: Real-time loop:** `Simulation.advance()` (src/robot3d/simulation.py),
+  shared by the MuJoCo viewer script and the server. Physics is anchored to a
+  (wall time, sim time) pair; each 60 fps frame steps until sim time catches
+  up, capped at 50 steps per frame, then resyncs. `play()` resyncs so nothing
+  "catches up" after a pause. The MuJoCo *passive* viewer only draws. It
+  applies its own Backspace/Reset inside `viewer.sync()` (reset to qpos0), so
+  the script detects time-going-backwards after `sync()` and resets to the
+  keyframe instead.
+- **2026-09-24: Frontend = Vite + TypeScript + three.js** (user's choice). All
+  WebSocket message types live in `web/src/protocol.ts`, mirrored by Pydantic
+  models, with the Vite dev server proxying `/ws` (user's spec).
+  - Sync is enforced by `tests/test_protocol.py` (ts-json-schema-generator vs.
+    Pydantic's `json_schema(mode="serialization")`, both reduced to a common
+    "shape": field names, required fields, types, and fixed array lengths).
+  - Pydantic models use `extra="forbid"`: unknown fields are rejected.
+- **2026-09-24: JSON frames, not binary:** every message is JSON so it can be
+  typed in protocol.ts and inspected in the browser devtools. Frames round
+  poses to 1e-5 (~1 KB per frame, ~60 KB/s). Only dynamic geoms (body not
+  welded to the world) are streamed; static scenery is sent once in the
+  scene. Switch to binary Float32Array only if big scenes need it.
+- **2026-09-24: One shared simulation per server**, like one real robot seen
+  from several screens; any tab's play/pause/reset affects all of them.
+- **2026-09-24: Server threading:** the sim runs on its own thread at a steady
+  60 fps (time.sleep is ~1 ms precise on Python 3.11+ Windows); asyncio
+  handles the network. Frames are serialized once and broadcast with
+  `loop.call_soon_threadsafe`; commands go through a `queue.SimpleQueue`.
+  Per client, only the newest frame is kept (slow clients skip frames);
+  scene/status/error messages are queued and never dropped. Frames are sent
+  only when sim time changed (none while paused). New clients get scene,
+  status, then the latest frame.
+- **2026-09-24: three.js runs z-up** (`Object3D.DEFAULT_UP = (0,0,1)` before
+  creating the camera), so MuJoCo poses go in unchanged. Capsules and cylinders
+  are rotated from three's y axis to MuJoCo's z axis. Colors are sRGB. Geom
+  groups > 2 are hidden (as in MuJoCo's viewer). The start camera = MuJoCo's
+  default free camera (`mjv_defaultFreeCamera`, sent in the scene). An infinite
+  plane is drawn as our own floor + grid (0.2 m / 1 m lines). The sun,
+  its shadow box, and the grid follow the center of the moving geoms.
+- **2026-09-24: Backend binds 127.0.0.1 by default** (`--host 0.0.0.0` to allow
+  other devices, e.g. a phone/tablet later). The Vite proxy targets
+  127.0.0.1:8000 (env `ROBOT3D_BACKEND` overrides), because Node may resolve
+  `localhost` to IPv6.
 
 ## Current status
 
-**Milestone 1 done (2026-09-24), waiting for the user to test.**
-- `robots/quadruped.xml`: the robot, commented for learning.
-- `src/robot3d/robots.py`: `load_model(name)`, `reset_to_keyframe(...)`.
-- `scripts/view_mujoco.py`: passive-viewer script with real-time loop;
-  Space = pause, Backspace = drop again; prints status lines.
-- `tests/test_quadruped.py`: structure check, plus drop-and-settle from `home`
-  and from straight legs. Checks: no warnings/NaN, upright, only feet touching,
-  final-second max joint speed < 0.01, feet drift < 2 mm.
-- Measured: lands from 0.40 m, settles at 0.261 m torso height within ~1.5 s,
-  ~1° pitch. Real-time pacing verified (4.0 s sim over 4.0 s wall).
+**Milestone 2 done (2026-09-24), waiting for the user to test.** (M1 confirmed
+working by the user.)
+- Verified in headless Edge (DevTools protocol), both via Vite (5173) and the
+  production build served by the backend (8000):
+  - streams at 60 fps; pause/reset/play buttons work (reset while paused
+    shows the robot hanging at 0.40 m); play runs sim time at real time.
+  - page reload works; auto-reconnect after a backend restart works.
+  - no console errors in the production build.
+- Parity: the web screenshot and MuJoCo's own offscreen render (same default
+  camera, settled robot) match in framing, position, and every leg angle.
+  Only the styling differs (MuJoCo: reflective checker floor, overhead light).
+- Tests: 15 passing (`uv run pytest`), `tsc` clean.
+- Deferred on purpose: keyboard shortcuts (M3), camera "follow robot" toggle
+  (useful once it walks, M4).
+- Git remote: the user will create an empty GitHub repo (suggested name
+  `robot3d`) and send the link; then add `origin` and push `main`.
 
 ## Notes for later milestones
 

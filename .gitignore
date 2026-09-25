@@ -7,6 +7,10 @@ __pycache__/
 build/
 dist/
 
+# Frontend (web/): npm packages and build output
+node_modules/
+web/dist/
+
 # MuJoCo writes this when it hits an error
 MUJOCO_LOG.TXT
 

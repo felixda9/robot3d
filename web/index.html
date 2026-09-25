@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>robot3d</title>
+  </head>
+  <body>
+    <div id="viewport"></div>
+
+    <div id="panel">
+      <div class="title">
+        <span id="connection-dot" class="dot" title="WebSocket connection"></span>
+        <span id="robot-name">connecting…</span>
+      </div>
+      <div class="buttons">
+        <button id="play-pause" disabled>Pause</button>
+        <button id="reset" disabled>Reset</button>
+      </div>
+      <div class="stats">
+        <span id="sim-time">t = 0.00 s</span>
+        <span id="stream-fps" title="frames received from the server per second">0 fps</span>
+      </div>
+    </div>
+
+    <div id="help">Left-drag: rotate · Right-drag: pan · Scroll: zoom</div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

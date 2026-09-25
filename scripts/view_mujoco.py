@@ -1,11 +1,11 @@
-"""Watch a robot in MuJoCo's built-in viewer (Milestone 1).
+"""Watch a robot in MuJoCo's built-in viewer.
 
     uv run scripts/view_mujoco.py                     # quadruped, dropped from "home"
     uv run scripts/view_mujoco.py --robot quadruped --keyframe home
     uv run scripts/view_mujoco.py --seconds 5         # auto-close after 5 s
 
-We run the simulation loop ourselves (MuJoCo's "passive" viewer only draws).
-The FastAPI server in Milestone 2 will use the same loop.
+We run the simulation loop ourselves (robot3d.simulation.Simulation, the same
+real-time loop the web server uses); MuJoCo's "passive" viewer only draws.
 
 Keys (with the viewer window focused):
     Space       pause / resume
@@ -21,14 +21,14 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-from robot3d.robots import available_robots, load_model, reset_to_keyframe
+from robot3d.robots import available_robots
+from robot3d.simulation import Simulation
 
 # GLFW key codes (the windowing library the MuJoCo viewer uses).
 KEY_SPACE = 32
 KEY_BACKSPACE = 259
 
 FRAME_DT = 1 / 60  # redraw the viewer at 60 fps
-MAX_STEPS_PER_FRAME = 50  # if the PC can't keep up, slow down instead of freezing
 SETTLED_SPEED = 1e-2  # "settled" = no joint moving faster than this (m/s or rad/s)
 
 
@@ -39,17 +39,16 @@ def main() -> None:
     parser.add_argument("--seconds", type=float, default=None, help="close automatically after this many seconds")
     args = parser.parse_args()
 
-    model = load_model(args.robot)
-    data = mujoco.MjData(model)
-    reset_to_keyframe(model, data, args.keyframe)
+    sim = Simulation(args.robot, args.keyframe)
+    model, data = sim.model, sim.data
 
     # The key callback runs on the viewer's thread, so it only sets flags;
     # the main loop below acts on them while it holds the viewer lock.
-    state = {"paused": False, "reset": False}
+    state = {"toggle_pause": False, "reset": False}
 
     def on_key(keycode: int) -> None:
         if keycode == KEY_SPACE:
-            state["paused"] = not state["paused"]
+            state["toggle_pause"] = True
         elif keycode == KEY_BACKSPACE:
             state["reset"] = True
 
@@ -61,10 +60,7 @@ def main() -> None:
 
     with mujoco.viewer.launch_passive(model, data, key_callback=on_key) as viewer:
         wall_start = time.perf_counter()
-        # Real-time pacing: sim time should advance as fast as the wall clock.
-        # We remember one (wall time, sim time) pair and step the physics until
-        # data.time catches up with the wall clock.
-        sync_wall, sync_sim = wall_start, data.time
+        sim.reset()  # restart the real-time clock now that the window is open
         next_report, last_status = 0.5, None
         print(f"Starting from keyframe '{args.keyframe}' (torso at {data.qpos[2]:.2f} m)")
 
@@ -74,16 +70,13 @@ def main() -> None:
                 break
 
             with viewer.lock():
-                if state["paused"]:
-                    sync_wall, sync_sim = frame_start, data.time  # don't try to "catch up" after a pause
-                else:
-                    target_sim_time = sync_sim + (frame_start - sync_wall)
-                    steps = 0
-                    while data.time < target_sim_time and steps < MAX_STEPS_PER_FRAME:
-                        mujoco.mj_step(model, data)
-                        steps += 1
-                    if steps == MAX_STEPS_PER_FRAME:  # fell behind: resync rather than spiral
-                        sync_wall, sync_sim = frame_start, data.time
+                if state["toggle_pause"]:
+                    state["toggle_pause"] = False
+                    if sim.paused:
+                        sim.play()
+                    else:
+                        sim.pause()
+                sim.advance(frame_start)  # step physics until sim time catches up
 
                 # Status line every 0.5 s of sim time while moving, once when settled.
                 if data.time >= next_report:
@@ -105,8 +98,7 @@ def main() -> None:
             if state["reset"] or data.time < time_before_sync:
                 state["reset"] = False
                 with viewer.lock():
-                    reset_to_keyframe(model, data, args.keyframe)
-                sync_wall, sync_sim = time.perf_counter(), data.time
+                    sim.reset()
                 next_report, last_status = 0.5, None
                 print(f"\nReset to keyframe '{args.keyframe}' (torso at {data.qpos[2]:.2f} m)")
 
