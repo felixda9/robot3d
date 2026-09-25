@@ -1,0 +1,204 @@
+<!--
+  quadruped.xml: a simple 8-motor, dog-style quadruped.
+
+  Conventions (shared by the whole project, see CLAUDE.md):
+    * SI units: meters, kilograms, seconds, radians.
+    * World frame: +x forward, +y left, +z up.
+    * Joint angle 0 = leg hanging straight down. The standing pose is the
+      "home" keyframe at the bottom of this file.
+    * Only primitive shapes (box, capsule, sphere; plane for the floor) so the
+      web viewer can draw everything without meshes.
+
+  Kinematic tree (each "body" is a rigid part; joints connect a body to its parent):
+
+    world
+     └─ torso            free joint: 6 DOF, the robot can fly/fall/tumble
+         ├─ FL_thigh     FL_hip  (hinge about y: swings the leg forward/back)
+         │   └─ FL_shin  FL_knee (hinge about y: bends the knee)
+         ├─ FR_thigh ... FR_shin
+         ├─ RL_thigh ... RL_shin
+         └─ RR_thigh ... RR_shin
+
+  Sign convention for both hinges (right-hand rule about +y):
+    positive angle rotates the leg segment BACKWARD (its lower end moves to -x).
+    The home pose (hip +0.7, knee -1.4) puts each knee behind its hip and each
+    foot directly below its hip, the "knees-back" stance used by most robot dogs.
+-->
+<mujoco model="quadruped">
+  <!-- MJCF's default angle unit is degrees; we use radians everywhere. -->
+  <compiler angle="radian" autolimits="true"/>
+
+  <!--
+    timestep: physics advances in 2 ms steps (500 Hz). Smaller is more accurate
+      but slower; 2 ms is the usual choice for legged robots.
+    integrator: "implicitfast" handles the velocity-dependent forces (motor and
+      joint damping) implicitly, which stays stable with stiff motors. The
+      default explicit Euler integrator can blow up with stiff damping.
+    cone + impratio: MuJoCo contacts are "soft" (they allow tiny penetration
+      and tiny slip, which keeps the math smooth). With the defaults, feet
+      pushing sideways slowly creep across the floor. Elliptic friction cones
+      with a high impratio make friction much stiffer than the normal contact:
+      the creep drops about 35x (measured: 7 mm -> 0.2 mm over 5 s). MuJoCo
+      Menagerie's robot dogs use the same setting.
+  -->
+  <option timestep="0.002" integrator="implicitfast" cone="elliptic" impratio="100"/>
+
+  <!-- Default camera framing and lighting for MuJoCo's built-in viewer. -->
+  <statistic center="0 0 0.2" extent="0.9"/>
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="135" elevation="-20"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="grid" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+             markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="grid" texture="grid" texrepeat="5 5" texuniform="true" reflectance="0.2"/>
+  </asset>
+
+  <default>
+    <!-- Everything inside the robot uses class "robot" (via childclass below). -->
+    <default class="robot">
+      <!--
+        Collision filtering: two geoms collide if
+          (A.contype & B.conaffinity) or (B.contype & A.conaffinity) is nonzero.
+        Robot geoms: contype=1, conaffinity=0 -> they hit world geoms (which keep
+        MuJoCo's default 1/1) but never each other. Skipping self-collision
+        keeps things simple and fast; legs that overlap simply pass through.
+      -->
+      <geom contype="1" conaffinity="0" condim="3" friction="1.0 0.005 0.0001"/>
+
+      <!--
+        Joints:
+          armature: extra rotational inertia added to the joint. It models the
+            spinning rotor of a geared motor (rotor inertia x gear ratio^2). It
+            makes light limbs behave like real motorized ones and improves
+            numerical stability.
+          damping: passive friction in the gearbox (torque = -damping * velocity).
+      -->
+      <joint type="hinge" axis="0 1 0" armature="0.01" damping="0.1"/>
+
+      <!--
+        Position actuators = a PD controller inside each motor:
+            torque = kp * (target_angle - angle) - kv * angular_velocity
+        clipped to forcerange (the motor's max torque, N*m).
+          kp: stiffness, how hard it pulls toward the target.
+          kv: damping, resists motion so it doesn't overshoot and oscillate.
+        The control input (data.ctrl) is the TARGET ANGLE in radians.
+        inheritrange="1" makes the allowed targets equal the joint's range.
+      -->
+      <position kp="40" kv="1.0" forcerange="-10 10" inheritrange="1"/>
+
+      <default class="hip">
+        <joint range="-1.0 1.8"/>
+      </default>
+      <default class="knee">
+        <!-- Knee only bends one way (like a real knee): 0 = straight, negative = bent. -->
+        <joint range="-2.6 0"/>
+      </default>
+
+      <default class="torso">
+        <geom rgba="0.25 0.35 0.55 1"/>
+      </default>
+      <default class="thigh">
+        <geom type="capsule" size="0.022" fromto="0 0 0  0 0 -0.16" mass="0.4" rgba="0.9 0.55 0.2 1"/>
+      </default>
+      <default class="shin">
+        <geom type="capsule" size="0.016" fromto="0 0 0  0 0 -0.16" mass="0.15" rgba="0.85 0.85 0.85 1"/>
+      </default>
+      <default class="foot">
+        <geom type="sphere" size="0.022" pos="0 0 -0.16" mass="0.05" rgba="0.15 0.15 0.15 1"/>
+      </default>
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="sun" pos="0 0 3" dir="0 0 -1" directional="true" castshadow="true"/>
+    <!-- size "0 0 ..." = infinite plane (planes are always infinite for collisions). -->
+    <geom name="floor" type="plane" size="0 0 0.05" material="grid"/>
+
+    <body name="torso" pos="0 0 0.4" childclass="robot">
+      <!-- Free joint: the torso isn't attached to anything; gravity and contacts move it. -->
+      <freejoint name="root"/>
+      <!-- A camera that follows the robot (in the viewer, press ] to switch to it). -->
+      <camera name="track" mode="trackcom" pos="0.4 -1.1 0.4" xyaxes="0.94 0.34 0  -0.11 0.30 0.95"/>
+
+      <!-- box size = HALF-extents: 0.40 m long, 0.16 m wide, 0.08 m tall. -->
+      <geom name="torso" class="torso" type="box" size="0.2 0.08 0.04" mass="4.0"/>
+      <!-- "Head" marks which way is forward (+x). -->
+      <geom name="head" class="torso" type="box" pos="0.22 0 0.015" size="0.03 0.055 0.03" mass="0.2"
+            rgba="0.95 0.95 0.95 1"/>
+
+      <!-- Legs. Hips sit near the torso corners, just outside its sides (y = +-0.11). -->
+      <body name="FL_thigh" pos="0.16 0.11 0">
+        <joint name="FL_hip" class="hip"/>
+        <geom name="FL_thigh" class="thigh"/>
+        <body name="FL_shin" pos="0 0 -0.16">
+          <joint name="FL_knee" class="knee"/>
+          <geom name="FL_shin" class="shin"/>
+          <geom name="FL_foot" class="foot"/>
+        </body>
+      </body>
+
+      <body name="FR_thigh" pos="0.16 -0.11 0">
+        <joint name="FR_hip" class="hip"/>
+        <geom name="FR_thigh" class="thigh"/>
+        <body name="FR_shin" pos="0 0 -0.16">
+          <joint name="FR_knee" class="knee"/>
+          <geom name="FR_shin" class="shin"/>
+          <geom name="FR_foot" class="foot"/>
+        </body>
+      </body>
+
+      <body name="RL_thigh" pos="-0.16 0.11 0">
+        <joint name="RL_hip" class="hip"/>
+        <geom name="RL_thigh" class="thigh"/>
+        <body name="RL_shin" pos="0 0 -0.16">
+          <joint name="RL_knee" class="knee"/>
+          <geom name="RL_shin" class="shin"/>
+          <geom name="RL_foot" class="foot"/>
+        </body>
+      </body>
+
+      <body name="RR_thigh" pos="-0.16 -0.11 0">
+        <joint name="RR_hip" class="hip"/>
+        <geom name="RR_thigh" class="thigh"/>
+        <body name="RR_shin" pos="0 0 -0.16">
+          <joint name="RR_knee" class="knee"/>
+          <geom name="RR_shin" class="shin"/>
+          <geom name="RR_foot" class="foot"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- One motor per joint. Order here = order of data.ctrl. -->
+  <actuator>
+    <position name="FL_hip"  joint="FL_hip"  class="robot"/>
+    <position name="FL_knee" joint="FL_knee" class="robot"/>
+    <position name="FR_hip"  joint="FR_hip"  class="robot"/>
+    <position name="FR_knee" joint="FR_knee" class="robot"/>
+    <position name="RL_hip"  joint="RL_hip"  class="robot"/>
+    <position name="RL_knee" joint="RL_knee" class="robot"/>
+    <position name="RR_hip"  joint="RR_hip"  class="robot"/>
+    <position name="RR_knee" joint="RR_knee" class="robot"/>
+  </actuator>
+
+  <keyframe>
+    <!--
+      "home": standing pose, released 0.4 m up so the robot visibly drops.
+      qpos = torso position (x y z), torso orientation quaternion (w x y z),
+             then the 8 joint angles in tree order (FL hip, FL knee, FR ..., RR ...).
+      ctrl = motor target angles, in actuator order (same order here).
+      With hip +0.7 and knee -1.4 the shin ends up at -0.7, so each foot is
+      directly below its hip: 2 * 0.16 * cos(0.7) = 0.245 m below the hip.
+    -->
+    <key name="home"
+         qpos="0 0 0.4  1 0 0 0
+               0.7 -1.4  0.7 -1.4  0.7 -1.4  0.7 -1.4"
+         ctrl="0.7 -1.4  0.7 -1.4  0.7 -1.4  0.7 -1.4"/>
+  </keyframe>
+</mujoco>

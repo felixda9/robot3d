@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# MuJoCo writes this when it hits an error
+MUJOCO_LOG.TXT
+
+# Training outputs (Milestone 4+)
+runs/
+checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
