@@ -160,12 +160,16 @@ export interface StatusMessage {
   stand_policy: string;
   /** The loaded get-up policy (drives after falls), or "" if none. */
   getup_policy: string;
+  /** The loaded jump policy (JumpCommand), or "" if none. */
+  jump_policy: string;
   /** Which policy drives while a policy drives. */
   mode: Mode;
   /** True while a policy drives the motors; set_ctrl is refused then. */
   policy_active: boolean;
   /** The robot fell and the get-up policy is getting it back up. */
   recovering: boolean;
+  /** The jump policy is doing a jump (until it has landed and settled). */
+  jumping: boolean;
 }
 
 /** The server rejected a message from this client. */
@@ -280,6 +284,11 @@ export interface SetModeCommand {
   mode: Mode;
 }
 
+/** Jump once (needs a jump policy; lets the policies drive). */
+export interface JumpCommand {
+  type: "jump";
+}
+
 export type ClientMessage =
   | PlayCommand
   | PauseCommand
@@ -290,7 +299,8 @@ export type ClientMessage =
   | GrabCommand
   | ReleaseCommand
   | PushCommand
-  | SetModeCommand;
+  | SetModeCommand
+  | JumpCommand;
 
 // ================================================================ HTTP API
 // The training dashboard reads runs over plain HTTP (JSON), not the

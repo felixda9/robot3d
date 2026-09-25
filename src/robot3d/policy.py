@@ -165,10 +165,13 @@ class Behaviors:
              until the robot has stood steady for RECOVERED_SECONDS, then the
              mode's policy drives again. With nothing else loaded, it also
              stands (it was trained to stand once up).
+      jump:  one jump on command (jump()): it drives ("jumping") until it has
+             landed and stood steady for RECOVERED_SECONDS, or its episode
+             length has passed; then the mode's policy again.
     """
 
     RECOVERED_SECONDS = 0.5
-    TASKS = ("walk", "stand", "getup")
+    TASKS = ("walk", "stand", "getup", "jump")
 
     def __init__(self) -> None:
         self.policies: dict[str, PolicyController] = {}
@@ -176,6 +179,10 @@ class Behaviors:
         self.mode = "walk"
         self.recovering = False
         self._steady_steps = 0
+        self.jumping = False
+        self._jump_steps = 0
+        self._jump_flight = 0
+        self._jump_landed = False
 
     def label(self, task: str) -> str:
         return self.labels.get(task, "")
@@ -203,11 +210,24 @@ class Behaviors:
         self.mode = mode
         self.reset()
 
+    def jump(self) -> None:
+        """Start one jump (the jump policy drives until it has landed and settled)."""
+        if "jump" not in self.policies:
+            raise ValueError("no jump policy loaded")
+        if self.recovering:
+            raise ValueError("it's getting up; jump once it stands")
+        self.jumping = True
+        self._jump_steps = self._jump_flight = self._steady_steps = 0
+        self._jump_landed = False
+        self.policies["jump"].reset()  # its clock starts: 0..1 over the jump
+
     @property
     def active(self) -> PolicyController:
         """The policy driving right now."""
         if self.recovering:
             return self.policies["getup"]
+        if self.jumping:
+            return self.policies["jump"]
         return self.policies.get(self.mode) or self.policies.get("getup") or next(iter(self.policies.values()))
 
     # --- Controller protocol
@@ -218,6 +238,7 @@ class Behaviors:
 
     def reset(self) -> None:
         self.recovering = False
+        self.jumping = False
         self._steady_steps = 0
         for policy in self.policies.values():
             policy.reset()
@@ -226,6 +247,18 @@ class Behaviors:
         self.active.reset_state(data)
 
     def act(self, data: mujoco.MjData) -> None:
+        if self.jumping:
+            jumper = self.policies["jump"]
+            task = jumper.task
+            _, self._jump_flight, self._jump_landed = task.jump_update(
+                self._jump_flight, self._jump_landed, task.feet_state(data)[1])
+            self._jump_steps += 1
+            self._steady_steps = self._steady_steps + 1 if self._jump_landed and task.steady(data) else 0
+            settled = self._steady_steps >= round(self.RECOVERED_SECONDS / task.control_dt)
+            if settled or self._jump_steps >= task.max_steps:
+                self.jumping = False  # back to the mode's policy
+                self._steady_steps = 0
+                self.active.reset()
         getup = self.policies.get("getup")
         if getup is not None and self.active is not getup or self.recovering:
             task = getup.task
@@ -233,6 +266,7 @@ class Behaviors:
             # episodes ended): don't cut in while it can still save itself.
             if not self.recovering and self.active.task.fell(data):
                 self.recovering = True  # hand over to the get-up policy
+                self.jumping = False
                 self._steady_steps = 0
                 getup.reset()
             elif self.recovering:

@@ -39,6 +39,7 @@ from robot3d.protocol import (
     ErrorMessage,
     EvaluateResponse,
     GrabCommand,
+    JumpCommand,
     LoadPolicyCommand,
     PauseCommand,
     PlayCommand,
@@ -246,6 +247,10 @@ class SimRunner:
                         self.behaviors.set_mode(mode)
                         self.sim.use_controller(True)  # picking a mode = let that policy drive
                         state_changed = True
+                    case JumpCommand():
+                        if not self.sim.controller_active:
+                            self.sim.use_controller(True)
+                        self.behaviors.jump()
                     case GrabCommand(geom=geom, point=point, target=target):
                         self.sim.grab(geom, point, target)
                     case ReleaseCommand():
@@ -284,9 +289,11 @@ class SimRunner:
             walk_policy=b.label("walk"),
             stand_policy=b.label("stand"),
             getup_policy=b.label("getup"),
+            jump_policy=b.label("jump"),
             mode=b.mode,
             policy_active=self.sim.controller_active,
             recovering=b.recovering and self.sim.controller_active,
+            jumping=b.jumping and self.sim.controller_active,
         ).model_dump_json()
 
 
@@ -341,6 +348,10 @@ def _refusal(command: ClientMessage, runner: SimRunner) -> str | None:
             return "no policy loaded (start the server with --policy <run folder or checkpoint>)"
         case SetModeCommand(mode=mode) if not runner.behaviors.has(mode):
             return f"no {mode} policy loaded (Watch a {mode} run in the Training tab)"
+        case JumpCommand() if "jump" not in runner.behaviors.policies:
+            return "no jump policy loaded (Watch a jump run in the Training tab)"
+        case JumpCommand() if runner.behaviors.recovering:
+            return "it's getting up; jump once it stands"
         case GrabCommand() | PushCommand():
             model = sim.model
             if command.geom >= model.ngeom:

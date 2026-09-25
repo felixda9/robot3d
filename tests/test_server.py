@@ -333,6 +333,9 @@ def test_walk_and_stand_modes(tiny_run, tiny_stand_run, tiny_getup_run, tmp_path
             status = receive_until(ws, "status", lambda s: s.getup_policy != "")
             assert status.mode == "walk"  # loading a get-up policy keeps the mode
 
+            ws.send_json({"type": "jump"})
+            assert "no jump policy" in receive_until(ws, "error").message
+
 
 def test_root_page_responds(client):
     assert client.get("/").status_code == 200

@@ -125,6 +125,28 @@ def test_the_getup_policy_takes_over_after_a_fall(tiny_run, tiny_stand_run, tiny
         only_getup.set_mode("walk")
 
 
+def test_jump_on_command(tiny_run, tiny_jump_run):
+    from robot3d.policy import Behaviors
+
+    sim = Simulation("quadruped")
+    walker = PolicyController(find_checkpoint(tiny_run), sim.model)
+    jumper = PolicyController(find_checkpoint(tiny_jump_run), sim.model)
+    behaviors = Behaviors()
+    with pytest.raises(ValueError, match="no jump policy"):
+        behaviors.jump()
+    behaviors.install(walker, "walker")
+    behaviors.install(jumper, "jumper")
+    assert behaviors.mode == "walk"  # loading a jump policy keeps the mode
+    sim.set_controller(behaviors)
+    behaviors.jump()
+    assert behaviors.jumping and behaviors.active is jumper and jumper.steps == 0  # its clock starts
+    for _ in range(jumper.task.max_steps - 1):
+        behaviors.act(sim.data)  # (the tiny policy doesn't really jump, so it never lands)
+    assert behaviors.jumping
+    behaviors.act(sim.data)  # its episode length is over: back to walking
+    assert not behaviors.jumping and behaviors.active is walker
+
+
 def test_skill_tests(tiny_run, tiny_getup_run):
     from robot3d.policy import skill_test
 

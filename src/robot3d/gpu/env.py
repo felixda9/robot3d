@@ -110,6 +110,8 @@ class GpuWalkEnv:
         self.start_xy = torch.zeros((num_envs, 2), device=self.device)
         self.next_push = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # episode step of the next shove
         self.steady_steps = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # get-up task
+        self.flight_steps = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # jump task
+        self.landed = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
         c = self.task.config
         # Each robot's current max shove (m/s): push_max_speed, or its curriculum level.
         self.push_level = torch.full((num_envs,), c.push_max_speed, device=self.device)
@@ -234,6 +236,7 @@ class GpuWalkEnv:
         steady = task.steady(self.qpos, torso_rot)
         self.steady_steps = torch.where(steady, self.steady_steps + 1, torch.zeros_like(self.steady_steps))
         succeeded = (self.steady_steps >= task.task.success_steps) & (task.config.success_bonus > 0)
+        airborne, self.flight_steps, self.landed = task.jump_update(self.flight_steps, self.landed, feet_down)
         vx, vy = task.heading_velocity(torso_rot, vx, vy)
         reward, terms = task.reward(
             vx=vx, vy=vy, motor_power=power, action=actions, last_action=self.last_action,
@@ -244,7 +247,7 @@ class GpuWalkEnv:
             turn_rate=task.turn_rate(self.qvel), height=self.qpos[:, 2],
             joint_offset=self.qpos[:, task.joint_qpos] - task.home_ctrl,
             joint_velocity=self.qvel[:, task.joint_qvel], angular_velocity=self.qvel[:, 3:6],
-            succeeded=succeeded,
+            succeeded=succeeded, jump_airborne=airborne, jump_landed=self.landed,
         )
         self.last_action = actions
         self.episode_length += 1
@@ -306,6 +309,8 @@ class GpuWalkEnv:
         self.episode_return[mask] = 0.0
         self.start_xy[mask] = self.qpos[mask, 0:2]
         self.steady_steps[mask] = 0
+        self.flight_steps[mask] = 0
+        self.landed[mask] = False
         self.push_left[mask] = 0
         self.xfrc[mask] = 0.0
         self.next_push[mask] = self._push_delays(self.num_envs)[mask]

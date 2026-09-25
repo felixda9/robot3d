@@ -93,9 +93,11 @@ class StatusMessage(_Message):
     walk_policy: str
     stand_policy: str
     getup_policy: str
+    jump_policy: str
     mode: Mode
     policy_active: bool
     recovering: bool
+    jumping: bool
 
 
 class ErrorMessage(_Message):
@@ -177,6 +179,10 @@ class SetModeCommand(_Message):
     mode: Mode
 
 
+class JumpCommand(_Message):
+    type: Literal["jump"] = "jump"
+
+
 ClientMessage = Annotated[
     PlayCommand
     | PauseCommand
@@ -187,7 +193,8 @@ ClientMessage = Annotated[
     | GrabCommand
     | ReleaseCommand
     | PushCommand
-    | SetModeCommand,
+    | SetModeCommand
+    | JumpCommand,
     Field(discriminator="type"),
 ]
 

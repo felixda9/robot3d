@@ -51,6 +51,7 @@ class WalkEnv(gym.Env):
         self._next_push = self._push_delay()
         self._steady_steps = 0
         self._push_left = 0  # control steps left of a force push
+        self._flight_steps, self._landed = 0, False  # jump task
         self._feet_down = self.task.feet_state(self.data)[1]
         self._air_time = np.zeros(len(self.task.feet))
         return self.task.observation(self.data, self._last_action, self.task.gait_phase(0)), {}
@@ -106,6 +107,7 @@ class WalkEnv(gym.Env):
         up_z = task.up_z(data)
         fell = task.fell(data)
         self._steady_steps = self._steady_steps + 1 if task.steady(data) else 0
+        airborne, self._flight_steps, self._landed = task.jump_update(self._flight_steps, self._landed, feet_down)
         succeeded = task.config.success_bonus > 0 and self._steady_steps >= task.success_steps
         reward, terms = task.reward(
             vx=vx, vy=vy, motor_power=power, action=action,
@@ -115,6 +117,7 @@ class WalkEnv(gym.Env):
             turn_rate=task.turn_rate(data), height=float(data.qpos[2]),
             joint_offset=data.qpos[task.joint_qpos] - task.home_ctrl,
             joint_velocity=data.qvel[task.joint_qvel], angular_velocity=data.qvel[3:6], succeeded=succeeded,
+            jump_airborne=airborne, jump_landed=self._landed,
         )
         self._last_action = action
         self._steps += 1

@@ -404,6 +404,36 @@ def test_stance_reward_wants_all_feet_down():
     assert reward_terms(WalkEnv("quadruped").task)["stance"] == 0.0  # walking: no
 
 
+def test_jump_task():
+    from robot3d.walk import WalkConfig
+
+    env = WalkEnv("quadruped12", WalkConfig.jump())
+    task, c = env.task, env.task.config
+    assert task.obs_size == 48 and task.max_steps == 150  # the clock input; 3 s episodes
+    assert task.gait_phase(0) == 0.0 and task.gait_phase(75) == pytest.approx(0.5)  # 0..1 over the jump
+
+    # Landing = touching down after >= 3 airborne steps (a 1-2 step bounce doesn't count).
+    flight, landed = 0, False
+    history = [(1, 1, 1, 1), (0, 0, 0, 0), (0, 0, 0, 0), (1, 0, 0, 0), (0, 0, 0, 0)]  # 2 steps up: bounce
+    for feet in history:
+        _, flight, landed = task.jump_update(flight, landed, np.array(feet, bool))
+    assert not landed
+    for feet in [(0, 0, 0, 0), (0, 0, 0, 0), (1, 1, 0, 0)]:  # 3 steps up, then down: landed
+        _, flight, landed = task.jump_update(flight, landed, np.array(feet, bool))
+    assert landed and flight == 0
+
+    def terms(**kw):
+        return task.reward(**{**reward_inputs(task), **kw})[1]
+
+    up = terms(jump_airborne=True, height=task.standing_height + 0.1, feet_down=np.zeros(4, bool))
+    assert up["jump"] == pytest.approx(c.jump_weight * 0.1) and up["settle"] == 0.0
+    again = terms(jump_airborne=True, jump_landed=True, height=task.standing_height + 0.1, feet_down=np.zeros(4, bool))
+    assert again["jump"] == 0.0 and again["rejump"] == -c.rejump_weight  # one jump only
+    assert terms(jump_landed=True)["settle"] == pytest.approx(c.settle_weight)  # landed, standing in the home pose
+    assert terms()["settle"] == 0.0  # no jump, no settle reward
+    assert reward_terms(WalkEnv("quadruped").task)["jump"] == 0.0  # other tasks: off
+
+
 def test_gait_rules_pause_while_knocked_off_speed(env):
     c = env.task.config
     assert c.constraint_gate_speed_error == 0.5

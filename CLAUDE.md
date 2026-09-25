@@ -170,10 +170,21 @@ web/                    Vite + TypeScript + three.js frontend
      needs terrain in training, M7), and **getup** (after a fall, in either
      mode, until standing steady; user's original choice of a separate
      get-up policy, like ANYmal's recovery controller).
-- [ ] **6. Robot designer:** simple YAML/JSON robot spec (body parts, joints,
+  4. [ ] **Jump on command** (user's choice, 2026-09-25): press J in the
+     viewer; a jump policy crouches, jumps as high as it can, lands on its
+     feet, settles, then hands back to the Stand/Walk policy (like get-up).
+- [ ] **6. Robot designer:** (postponed by the user, 2026-09-25: "don't make
+  the robot designer now") simple YAML/JSON robot spec (body parts, joints,
   motors) → generated MJCF; then a visual editor in the browser.
 - [ ] **7. Environments & commands:** terrain, stairs, obstacles. Train a policy
   that follows direction + speed commands, controllable by keyboard or gamepad.
+  User's order (2026-09-25): **steering commands first** (forward/back,
+  sideways, turn, from keyboard/gamepad), then terrain (incl. the stand
+  policy settling on uneven ground).
+- [ ] **8. Humanoid** (user's request, 2026-09-25): a new human-like robot,
+  **legs + arms, ~21 motors** (6 per leg: hip ×3, knee, ankle ×2; 3 per
+  arm; 1 waist), **child-size ~1.0 m, ~20 kg** (like Booster T1), primitive
+  shapes only; then walk / stand / get-up with the same pipeline.
 
 ## How we work
 

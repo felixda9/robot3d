@@ -122,6 +122,8 @@ class BatchedWalkTask:
         joint_velocity: torch.Tensor,
         angular_velocity: torch.Tensor,
         succeeded: torch.Tensor | None = None,
+        jump_airborne: torch.Tensor | None = None,
+        jump_landed: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """(N,) rewards and (N,) per-term values, same terms as WalkTask.reward.
         feet_down, landed: (N, feet) bool; air_time, foot_height: (N, feet);
@@ -177,6 +179,12 @@ class BatchedWalkTask:
             "hold": c.hold_weight * is_up * at_height * torch.exp(-0.5 * (action**2).sum(dim=1)),
             "stance": c.stance_weight * calm * feet_down.float().mean(dim=1),
         }
+        up_in_air = jump_airborne.float() if jump_airborne is not None else torch.zeros_like(vx)
+        has_landed = jump_landed.float() if jump_landed is not None else torch.zeros_like(vx)
+        terms["jump"] = c.jump_weight * up_in_air * (1 - has_landed) * (height - self.standing_height).clamp(min=0.0)
+        terms["rejump"] = -c.rejump_weight * up_in_air * has_landed
+        terms["settle"] = (c.settle_weight * has_landed * feet_down.float().mean(dim=1)
+                           * torch.exp(-(joint_offset**2).sum(dim=1) / 0.5))
         total = torch.stack(list(terms.values())).sum(dim=0)
         return (total.clamp(min=0.0) if c.reward_floor else total), terms
 
@@ -191,6 +199,12 @@ class BatchedWalkTask:
     @staticmethod
     def up_z(torso_rot: torch.Tensor) -> torch.Tensor:
         return torso_rot[:, 2, 2]
+
+    def jump_update(self, flight_steps: torch.Tensor, landed: torch.Tensor, feet_down: torch.Tensor):
+        """Same as WalkTask.jump_update, batched."""
+        airborne = ~feet_down.any(dim=1)
+        landed = landed | (~airborne & (flight_steps >= self.task.LANDING_AIR_STEPS))
+        return airborne, torch.where(airborne, flight_steps + 1, torch.zeros_like(flight_steps)), landed
 
     def steady(self, qpos: torch.Tensor, torso_rot: torch.Tensor) -> torch.Tensor:
         """Same as WalkTask.steady, batched."""

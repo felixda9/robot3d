@@ -28,6 +28,8 @@ const ui = {
   modeStand: element<HTMLButtonElement>("mode-stand"),
   recovering: element<HTMLDivElement>("recovering"),
   getupName: element<HTMLDivElement>("getup-name"),
+  jump: element<HTMLButtonElement>("jump"),
+  jumping: element<HTMLDivElement>("jumping"),
   simTime: element<HTMLSpanElement>("sim-time"),
   streamFps: element<HTMLSpanElement>("stream-fps"),
   motors: element<HTMLDivElement>("motors"),
@@ -47,11 +49,14 @@ let status: StatusMessage = {
   walk_policy: "",
   stand_policy: "",
   getup_policy: "",
+  jump_policy: "",
   mode: "walk",
   policy_active: false,
   recovering: false,
+  jumping: false,
 };
-const hasPolicy = (): boolean => status.walk_policy !== "" || status.stand_policy !== "" || status.getup_policy !== "";
+const hasPolicy = (): boolean =>
+  status.walk_policy !== "" || status.stand_policy !== "" || status.getup_policy !== "" || status.jump_policy !== "";
 /** The policy a mode would use ("" = can't): stand mode falls back on the get-up policy. */
 const policyFor = (mode: Mode): string =>
   mode === "walk" ? status.walk_policy : status.stand_policy || status.getup_policy;
@@ -123,6 +128,10 @@ function applyStatus(next: StatusMessage): void {
         : `${mode === "walk" ? "Walk" : "Stand: stays upright in place, gets up after falls"} (M switches)`;
   }
   ui.recovering.hidden = !status.recovering;
+  ui.jumping.hidden = !status.jumping;
+  ui.jump.hidden = status.jump_policy === "";
+  ui.jump.disabled = status.recovering || status.jumping;
+  ui.jump.title = status.jump_policy === "" ? "" : `Jump once (J): ${status.jump_policy}`;
   ui.getupName.textContent =
     status.getup_policy === ""
       ? "Get-up: none (after a fall it stays down)"
@@ -148,6 +157,10 @@ function setMode(mode: Mode): void {
   if (policyFor(mode) !== "") connection.send({ type: "set_mode", mode });
 }
 
+function jump(): void {
+  if (status.jump_policy !== "" && !status.recovering && !status.jumping) connection.send({ type: "jump" });
+}
+
 function toggleMode(): void {
   setMode(status.mode === "walk" ? "stand" : "walk");
 }
@@ -164,6 +177,7 @@ for (const [button, action] of [
   [ui.policyToggle, togglePolicy],
   [ui.modeWalk, () => setMode("walk")],
   [ui.modeStand, () => setMode("stand")],
+  [ui.jump, jump],
 ] as const) {
   button.addEventListener("click", () => {
     action();
@@ -249,6 +263,8 @@ window.addEventListener("keydown", (event) => {
     togglePolicy();
   } else if (key === "m") {
     toggleMode();
+  } else if (key === "j") {
+    jump();
   } else if (/^[1-9]$/.test(key)) {
     motors.applyPreset(Number(key) - 1);
   }
@@ -258,6 +274,7 @@ function updateHelp(): void {
   const parts = ["<kbd>Space</kbd> play/pause", "<kbd>R</kbd> reset", "<kbd>F</kbd> follow"];
   if (hasPolicy()) parts.push("<kbd>P</kbd> policy/manual");
   if (policyFor("walk") !== "" && policyFor("stand") !== "") parts.push("<kbd>M</kbd> walk/stand");
+  if (status.jump_policy !== "") parts.push("<kbd>J</kbd> jump");
   if (!status.policy_active && presetCount > 0) {
     parts.push(`<kbd>${presetCount > 1 ? `1–${Math.min(presetCount, 9)}` : "1"}</kbd> poses`);
   }

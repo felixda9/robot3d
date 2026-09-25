@@ -22,7 +22,8 @@ import numpy as np
 
 @dataclass(frozen=True)
 class WalkConfig:
-    # "walk", "stand" (stand still, catch shoves) or "getup" (get up after a fall).
+    # "walk", "stand" (stand still, catch shoves), "getup" (get up after a
+    # fall) or "jump" (one high jump on command, then stand).
     task: str = "walk"
 
     # --- control
@@ -94,6 +95,12 @@ class WalkConfig:
     # Lab's Spot config gates at 0.5 m/s). stand12_calm, always penalized for
     # moving, stood still but wouldn't step to catch a shove.
     stillness_speed_gate: float = 0.0
+
+    # Jumping (the jump task; 0 elsewhere). The robot is "airborne" with all
+    # feet up; it has "landed" once it touched down after >= 3 airborne steps.
+    jump_weight: float = 0.0  # x (torso height - standing height), while airborne before landing
+    rejump_weight: float = 0.0  # penalty per airborne step after landing: one jump only
+    settle_weight: float = 0.0  # after landing: x share of feet down x exp(-|q - home|^2 / 0.5)
 
     # x share of feet on the ground, while calm (standing): stand12_v3 rested
     # on three feet, the fourth 49 mm up, since nothing asked for four.
@@ -204,6 +211,38 @@ class WalkConfig:
             push_max_speed=1.0,  # (curriculum up to push_curriculum_max = 3 m/s, ~216 N)
             push_max_spin=0.0,  # force pushes tip the robot by themselves
             stance_weight=1.0,
+        )
+
+    @classmethod
+    def jump(cls) -> "WalkConfig":
+        """The jump task (5c, the user's "jump on command"): from standing,
+        one jump as high as it can, land on its feet, settle into the
+        standing pose. An episode is one jump (3 s); in the viewer, pressing
+        J starts one. The clock (one cycle per episode) tells the policy how
+        far into the jump it is."""
+        return cls(
+            task="jump",
+            episode_seconds=3.0,
+            gait_frequency=1.0 / 3.0,  # the clock input: 0..1 over the jump
+            gait_weight=0.0,
+            clearance_weight=0.0,
+            target_speed=0.0,
+            tracking_weight=0.5,  # jump in place
+            upright_weight=0.0,
+            orientation_weight=1.0,  # stay level, in the air too
+            jump_weight=50.0,  # a 10 cm high jump: ~20 over its ~0.3 s flight
+            rejump_weight=1.0,
+            settle_weight=1.0,  # can only be earned after jumping
+            support_weight=0.0,  # all feet up is the point
+            slip_weight=0.0,
+            roll_weight=0.0,
+            energy_weight=0.0005,
+            smoothness_weight=0.01,
+            action_scale=1.0,  # deep crouch, full extension
+            push_interval=0.0,
+            reward_floor=True,
+            min_up_z=0.5,  # a fall: tilted past 60 deg or below half height
+            min_height_fraction=0.5,
         )
 
     @classmethod
@@ -450,6 +489,8 @@ class WalkTask:
         joint_velocity: np.ndarray,
         angular_velocity: np.ndarray,
         succeeded: bool = False,
+        jump_airborne: bool = False,
+        jump_landed: bool = False,
     ) -> tuple[float, dict[str, float]]:
         """Reward for one control step, plus each term separately (for logging).
 
@@ -509,6 +550,10 @@ class WalkTask:
             "orientation": c.orientation_weight * math.exp(-4.0 * (1.0 - up_z)),
             "hold": c.hold_weight * is_up * at_height * math.exp(-0.5 * float(np.sum(action**2))),
             "stance": c.stance_weight * calm * float(np.mean(feet_down)),
+            "jump": c.jump_weight * float(jump_airborne and not jump_landed) * max(height - self.standing_height, 0.0),
+            "rejump": -c.rejump_weight * float(jump_airborne and jump_landed),
+            "settle": c.settle_weight * float(jump_landed) * float(np.mean(feet_down))
+            * math.exp(-float(np.sum(joint_offset**2)) / 0.5),
         }
         total = float(sum(terms.values()))
         return (max(total, 0.0) if c.reward_floor else total), terms
@@ -581,6 +626,15 @@ class WalkTask:
     def up_z(data: mujoco.MjData) -> float:
         """z-component of the torso's "up" axis: 1 = level, 0 = on its side, -1 = upside down."""
         return float(data.xmat[1][8])
+
+    LANDING_AIR_STEPS = 3  # airborne this many control steps (60 ms) before a touchdown counts as landing
+
+    def jump_update(self, flight_steps: int, landed: bool, feet_down: np.ndarray) -> tuple[bool, int, bool]:
+        """Jump bookkeeping per control step: (airborne now, new flight_steps, landed)."""
+        airborne = not feet_down.any()
+        if not airborne and flight_steps >= self.LANDING_AIR_STEPS:
+            landed = True
+        return airborne, (flight_steps + 1 if airborne else 0), landed
 
     def steady(self, data: mujoco.MjData) -> bool:
         """Standing up properly: torso level within 20 deg and at >= 90% of

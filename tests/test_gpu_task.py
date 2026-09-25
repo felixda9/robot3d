@@ -174,6 +174,20 @@ def test_gait_clock_matches_exactly(snapshots):
     assert down.tolist() == [task.desired_down(p).tolist() for p in expected]
 
 
+def test_jump_update_matches(snapshots):
+    task, _ = snapshots
+    batched = BatchedWalkTask(task, "cpu")
+    rng = np.random.default_rng(6)
+    flight = rng.integers(0, 6, N)
+    landed = rng.random(N) < 0.3
+    down = rng.random((N, len(task.feet))) < 0.3
+    down[: N // 2] = False  # half of them airborne
+    got = batched.jump_update(torch.tensor(flight), torch.tensor(landed), torch.tensor(down))
+    for i in range(N):
+        expected = task.jump_update(int(flight[i]), bool(landed[i]), down[i])
+        assert (bool(got[0][i]), int(got[1][i]), bool(got[2][i])) == expected
+
+
 def test_air_time_update_matches(snapshots):
     task, _ = snapshots
     batched = BatchedWalkTask(task, "cpu")
@@ -191,7 +205,7 @@ def test_air_time_update_matches(snapshots):
 @pytest.mark.parametrize(
     "robot, kind",
     [("quadruped", "stand"), ("quadruped", "getup"), ("quadruped12", "getup"), ("quadruped12", "walk"),
-     ("quadruped12", "stand")],
+     ("quadruped12", "stand"), ("quadruped12", "jump")],
 )
 def test_reward_matches_for_other_tasks_and_robots(robot, kind):
     """The stand and get-up tasks, and the 12-motor robot (roll penalty)."""
@@ -213,8 +227,10 @@ def test_reward_matches_for_other_tasks_and_robots(robot, kind):
         "phase": np.zeros(N), "turn_rate": rng.uniform(-2, 2, N), "height": rng.uniform(0.0, 0.35, N),
         "joint_offset": rng.uniform(-1, 1, (N, task.num_actions)),
         "joint_velocity": rng.uniform(-5, 5, (N, task.num_actions)), "angular_velocity": rng.uniform(-2, 2, (N, 3)),
+        "jump_airborne": rng.random(N) < 0.5, "jump_landed": rng.random(N) < 0.5,
     }
-    dtypes = {"fell": torch.bool, "feet_down": torch.bool, "landed": torch.bool, "phase": torch.float64}
+    dtypes = {"fell": torch.bool, "feet_down": torch.bool, "landed": torch.bool, "phase": torch.float64,
+              "jump_airborne": torch.bool, "jump_landed": torch.bool}
     rewards, terms = batched.reward(**{k: torch.tensor(v, dtype=dtypes.get(k, torch.float32)) for k, v in inputs.items()})
     for i in range(N):
         r, t = task.reward(**{k: v[i] for k, v in inputs.items()})
