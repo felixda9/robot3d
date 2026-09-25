@@ -209,8 +209,8 @@ def run_task(info: dict) -> str:
 
 # policy.skill_test's version: evaluations with another (or no) skill test
 # count as not evaluated, so "best" compares like with like. v2: viewer-style
-# force pushes instead of v1's velocity kicks.
-SKILL_TEST_VERSION = "v2"
+# force pushes instead of v1's velocity kicks. v3: jump runs get the jump test (v2 servers pushed them).
+SKILL_TEST_VERSION = "v3"
 
 
 def needs_evaluation(checkpoint: Checkpoint) -> bool:

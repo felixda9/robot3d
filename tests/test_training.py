@@ -172,7 +172,7 @@ def test_skill_tests(tiny_run, tiny_getup_run):
     from robot3d.policy import skill_test
 
     walk = skill_test(find_checkpoint(tiny_run))
-    assert 0.0 <= walk["skill"] <= 1.0 and walk["skill_test"].startswith("v2: pushes of")
+    assert 0.0 <= walk["skill"] <= 1.0 and walk["skill_test"].startswith("v3: pushes of")
     getup = skill_test(find_checkpoint(tiny_getup_run))
     assert 0.0 <= getup["skill"] <= 1.0 and "24 fallen starts" in getup["skill_test"]
     assert walk == skill_test(find_checkpoint(tiny_run))  # deterministic: comparable across checkpoints

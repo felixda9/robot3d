@@ -8,7 +8,7 @@ import type { CheckpointInfo, RunDetail, RunSummary, ScalarSeries } from "../pro
 import { formatSteps, LineChart, type ChartOptions, type ChartSeries } from "./linechart";
 
 const SERIES_SLOTS = 8; // categorical palette size (dashboard.css --series-1..8)
-const SKILL_TEST = "v2"; // runs.SKILL_TEST_VERSION: skill results of other versions count as not evaluated
+const SKILL_TEST = "v3"; // runs.SKILL_TEST_VERSION: skill results of other versions count as not evaluated
 const POLL_MS = 10_000; // runs list + curves of running runs
 const EVAL_POLL_MS = 2_000; // while checkpoints are being evaluated
 
