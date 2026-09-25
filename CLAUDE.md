@@ -805,6 +805,21 @@ web/                    Vite + TypeScript + three.js frontend
   that adapts (policy-set clock frequency or ground-force feedback: the
   ORC paper roughly halved failures vs a fixed clock), privileged critic
   inputs, randomization/noise/latency (mostly for a real robot).
+- **2026-09-25: Results with the surveyed recipes** (50M steps each):
+  - `stand12_v3`: stillness (no shoves, 10 s) joint speed 0.001 rad/s,
+    2.9° off home (motors alone 2.1°), wobble 0.1 °/s, 1.4 cm drift:
+    as still as the bare motors. Shoves 100 / 100 / 93 / 43 / 31 / 18% at
+    0.5 … 3.0 m/s (stand12_calm: 87 / 68 / 50 / 50 / 25 / 12%). Training
+    falls dropped from > 80% to ~5% (reward floor).
+  - `getup12_v3`: up within 10 s from its back 35/35, side 18/18,
+    belly/feet 11/11 (median ~0.5 s); from standing 8/8 stay up. (Every
+    earlier attempt: 0 from its back.)
+  - The whole chain in the real-time Simulation (Behaviors with
+    walk12_tidy + stand12_v3 + getup12_v3): knocked upside down, onto a
+    side or its nose, in Stand and Walk mode: the get-up policy takes over
+    at once, hands back after 1.3–2.0 s, and the robot stands still (Stand)
+    or walks on (Walk, ~0.4 m/s).
+  - Adaptive learning rate: both runs trained without stalling.
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -828,11 +843,14 @@ web/                    Vite + TypeScript + three.js frontend
   Stand modes with the automatic switch are built and tested. Training now,
   `walk12_tidy` (+ roll penalty) is done: straight, mostly tidy, and far
   more shove-proof (see Decisions); waiting for the user's verdict on its
-  look. Standing and getting up are separate tasks (the combined one
-  "moved way too much" and later collapsed). After an open-source survey
-  (user's request) the stand and getup recipes follow Isaac Lab's Spot and
-  MuJoCo Playground's Go1 getup, and PPO uses an adaptive learning rate.
-  Training: `stand12_v3` and `getup12_v3`.
+  look. After an open-source survey (user's request) the stand and getup
+  recipes follow Isaac Lab's Spot and MuJoCo Playground's Go1 getup:
+  `stand12_v3` stands as still as the bare motors, `getup12_v3` gets up
+  from every fallen pose tested, and the Walk/Stand/get-up chain works.
+  Waiting for the user to try them. A second survey (walking under
+  pushes) led to `walk12_robust`: walk12_tidy fine-tuned with a shove
+  curriculum to 3 m/s, looser falls and paused gait rules while knocked
+  off speed (training, 60M steps).
 - `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
   - 0 KL spikes (walk_10m: 114, max 50.5);
   - steady 1.0–1.28 m/s after 3M steps;
