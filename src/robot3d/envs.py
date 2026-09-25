@@ -52,9 +52,10 @@ class WalkEnv(gym.Env):
         self._steady_steps = 0
         self._push_left = 0  # control steps left of a force push
         self._flight_steps, self._landed = 0, False  # jump task
+        self._resample_command()
         self._feet_down = self.task.feet_state(self.data)[1]
         self._air_time = np.zeros(len(self.task.feet))
-        return self.task.observation(self.data, self._last_action, self.task.gait_phase(0)), {}
+        return self.task.observation(self.data, self._last_action, self.task.gait_phase(0), self._command), {}
 
     def step(self, action):
         task, model, data = self.task, self.model, self.data
@@ -62,6 +63,8 @@ class WalkEnv(gym.Env):
         data.ctrl[:] = task.action_to_ctrl(action, data.qpos[task.joint_qpos])
 
         c = task.config
+        if c.commands and self._steps >= self._next_command:
+            self._resample_command()
         if c.push_interval > 0 and self._steps >= self._next_push and c.push_kind == "force":
             # A push like the viewer's (see WalkConfig.push_kind).
             self.push(self.np_random.uniform(0, 2 * np.pi), self.np_random.uniform(0, c.push_max_speed),
@@ -117,12 +120,12 @@ class WalkEnv(gym.Env):
             turn_rate=task.turn_rate(data), height=float(data.qpos[2]),
             joint_offset=data.qpos[task.joint_qpos] - task.home_ctrl,
             joint_velocity=data.qvel[task.joint_qvel], angular_velocity=data.qvel[3:6], succeeded=succeeded,
-            jump_airborne=airborne, jump_landed=self._landed,
+            jump_airborne=airborne, jump_landed=self._landed, command=self._command,
         )
         self._last_action = action
         self._steps += 1
 
-        observation = task.observation(data, self._last_action, task.gait_phase(self._steps))
+        observation = task.observation(data, self._last_action, task.gait_phase(self._steps), self._command)
         # A fall ends a walk/stand episode; getting up steadily ends a get-up one.
         terminated = (fell and task.config.terminate_on_fall) or succeeded
         truncated = self._steps >= task.max_steps
@@ -135,6 +138,16 @@ class WalkEnv(gym.Env):
             **{f"reward_{name}": value for name, value in terms.items()},
         }
         return observation, reward, terminated, truncated, info
+
+    def _resample_command(self) -> None:
+        """A new steering command (WalkConfig.commands), or walking straight at target_speed."""
+        task = self.task
+        if task.config.commands:
+            self._command = task.sample_command(self.np_random)
+            self._next_command = self._steps + round(task.config.command_resample_seconds / task.control_dt)
+        else:
+            self._command = task.default_command()
+            self._next_command = 2**62
 
     def push(self, angle: float, size: float, height: float) -> None:
         """Start a viewer-like force push on the torso (WalkTask.push_wrench):

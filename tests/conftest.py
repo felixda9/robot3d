@@ -48,3 +48,8 @@ def tiny_getup_run(tmp_path_factory):
 @pytest.fixture(scope="session")
 def tiny_jump_run(tmp_path_factory):
     return _tiny_task_run(tmp_path_factory, "jump")
+
+
+@pytest.fixture(scope="session")
+def tiny_steer_run(tmp_path_factory):
+    return _tiny_task_run(tmp_path_factory, "steer")

@@ -147,6 +147,27 @@ def test_jump_on_command(tiny_run, tiny_jump_run):
     assert not behaviors.jumping and behaviors.active is walker
 
 
+def test_steering_a_policy(tiny_run, tiny_steer_run):
+    from robot3d.policy import Behaviors
+
+    sim = Simulation("quadruped")
+    behaviors = Behaviors()
+    behaviors.install(PolicyController(find_checkpoint(tiny_run), sim.model), "plain")
+    assert not behaviors.steerable and behaviors.command_limits() == (0, 0, 0, 0)
+    with pytest.raises(ValueError, match="steering"):
+        behaviors.set_command(0.3, 0, 0)
+    steer = PolicyController(find_checkpoint(tiny_steer_run), sim.model)
+    assert steer.steerable and np.allclose(steer.command, 0)  # starts standing still
+    behaviors.install(steer, "steer")
+    behaviors.set_command(5.0, 0.1, -9.0)
+    c = steer.task.config
+    assert np.allclose(steer.command, [c.command_max_forward, 0.1, -c.command_max_turn])  # clamped
+    sim.set_controller(behaviors)
+    for _ in range(20):
+        sim.step()  # its observation carries the command
+    assert np.isfinite(sim.data.qpos).all()
+
+
 def test_skill_tests(tiny_run, tiny_getup_run):
     from robot3d.policy import skill_test
 

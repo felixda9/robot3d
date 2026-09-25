@@ -2,6 +2,7 @@ import "./style.css";
 import { Connection, defaultSocketUrl } from "./connection";
 import { Dashboard } from "./dashboard/dashboard";
 import { RobotMouse } from "./interaction";
+import { Steering } from "./steering";
 import { MotorPanel } from "./motors";
 import type { Mode, ServerMessage, StatusMessage } from "./protocol";
 import { Viewer } from "./viewer";
@@ -30,6 +31,7 @@ const ui = {
   getupName: element<HTMLDivElement>("getup-name"),
   jump: element<HTMLButtonElement>("jump"),
   jumping: element<HTMLDivElement>("jumping"),
+  steering: element<HTMLDivElement>("steering"),
   simTime: element<HTMLSpanElement>("sim-time"),
   streamFps: element<HTMLSpanElement>("stream-fps"),
   motors: element<HTMLDivElement>("motors"),
@@ -54,6 +56,8 @@ let status: StatusMessage = {
   policy_active: false,
   recovering: false,
   jumping: false,
+  steerable: false,
+  command_limits: [0, 0, 0, 0],
 };
 const hasPolicy = (): boolean =>
   status.walk_policy !== "" || status.stand_policy !== "" || status.getup_policy !== "" || status.jump_policy !== "";
@@ -61,6 +65,11 @@ const hasPolicy = (): boolean =>
 const policyFor = (mode: Mode): string =>
   mode === "walk" ? status.walk_policy : status.stand_policy || status.getup_policy;
 new RobotMouse(viewer, (message) => connection.send(message), () => Number(ui.pushForce.value));
+const steering = new Steering((message) => connection.send(message), () => view === "sim");
+steering.onCommand = (forward, sideways, turn) => {
+  ui.steering.textContent =
+    `Steering: ${forward.toFixed(2)} m/s forward, ${sideways.toFixed(2)} m/s left, ${turn.toFixed(2)} rad/s turn`;
+};
 let presetCount = 0;
 let framesThisSecond = 0;
 viewer.setFollow(ui.follow.checked);
@@ -128,6 +137,9 @@ function applyStatus(next: StatusMessage): void {
         : `${mode === "walk" ? "Walk" : "Stand: stays upright in place, gets up after falls"} (M switches)`;
   }
   ui.recovering.hidden = !status.recovering;
+  steering.setStatus(status);
+  ui.steering.hidden = !(status.steerable && status.mode === "walk");
+  if (ui.steering.textContent === "") ui.steering.textContent = "Steering: W/S A/D Q/E, arrows or a gamepad";
   ui.jumping.hidden = !status.jumping;
   ui.jump.hidden = status.jump_policy === "";
   ui.jump.disabled = status.recovering || status.jumping;
@@ -275,6 +287,7 @@ function updateHelp(): void {
   if (hasPolicy()) parts.push("<kbd>P</kbd> policy/manual");
   if (policyFor("walk") !== "" && policyFor("stand") !== "") parts.push("<kbd>M</kbd> walk/stand");
   if (status.jump_policy !== "") parts.push("<kbd>J</kbd> jump");
+  if (status.steerable && status.mode === "walk") parts.push("<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> <kbd>Q</kbd><kbd>E</kbd> steer");
   if (!status.policy_active && presetCount > 0) {
     parts.push(`<kbd>${presetCount > 1 ? `1–${Math.min(presetCount, 9)}` : "1"}</kbd> poses`);
   }

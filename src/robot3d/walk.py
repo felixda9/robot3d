@@ -37,6 +37,24 @@ class WalkConfig:
     action_mode: str = "home"
     episode_seconds: float = 20.0  # then the episode is cut off ("truncated")
 
+    # --- steering commands (M7): the policy observes a command (forward and
+    # sideways speed in its heading frame, turn rate) and is rewarded for
+    # following it; without commands it walks at target_speed, straight.
+    # Commands are drawn per robot every command_resample_seconds: forward
+    # 90% of the time, sideways 30%, turning 50%, each uniform in its range;
+    # and command_zero_fraction of them "stand still" (all zero), where the
+    # gait rules pause and `still` pays for standing in the home pose on all
+    # feet (as Playground/Isaac Lab do at zero command; otherwise a clocked
+    # walker marches in place).
+    commands: bool = False
+    command_max_forward: float = 0.6  # m/s
+    command_max_backward: float = 0.3  # m/s
+    command_max_sideways: float = 0.3  # m/s
+    command_max_turn: float = 1.0  # rad/s
+    command_resample_seconds: float = 5.0
+    command_zero_fraction: float = 0.1
+    still_weight: float = 0.0  # at a zero command: x share of feet down x exp(-|q - home|^2 / 0.1)
+
     # --- reward: one number per control step; the policy learns to make the sum large.
     # The task (since 2026-09-25): a calm trot-walk at a target speed along +x.
     target_speed: float = 0.4  # m/s: a walk for this robot size (it runs above ~0.8 m/s)
@@ -214,6 +232,12 @@ class WalkConfig:
         )
 
     @classmethod
+    def steer(cls) -> "WalkConfig":
+        """Walking that follows steering commands (M7): forward/back, sideways
+        and turning, or standing still at a zero command. Task "walk"."""
+        return cls(commands=True, still_weight=1.0, turn_weight=1.0)
+
+    @classmethod
     def jump(cls) -> "WalkConfig":
         """The jump task (5c, the user's "jump on command"): from standing,
         one jump as high as it can, land on its feet, settle into the
@@ -357,7 +381,8 @@ class WalkTask:
         # then per motor: joint angle, joint speed, previous action,
         # then with the gait clock: its phase as (sin, cos)
         self.clock = config.gait_frequency > 0
-        self.obs_size = 1 + 3 + 3 + 3 + 3 * model.nu + (2 if self.clock else 0)
+        # ... and with commands: the command (forward, sideways, turn)
+        self.obs_size = 1 + 3 + 3 + 3 + 3 * model.nu + (2 if self.clock else 0) + (3 if config.commands else 0)
         # Phase advance per control step. Phases are computed from the integer
         # step count in float64 (here and on the GPU), so both agree exactly,
         # even right at a cycle boundary.
@@ -407,7 +432,8 @@ class WalkTask:
 
     # ------------------------------------------------------------- observation
 
-    def observation(self, data: mujoco.MjData, last_action: np.ndarray, phase: float = 0.0) -> np.ndarray:
+    def observation(self, data: mujoco.MjData, last_action: np.ndarray, phase: float = 0.0,
+                    command: np.ndarray | None = None) -> np.ndarray:
         """What the policy "feels", like a real robot's IMU and joint encoders
         (plus, with the gait clock, where in the stepping rhythm it is).
 
@@ -431,7 +457,38 @@ class WalkTask:
             # sin/cos rather than the raw phase: 0.99 and 0.01 are neighbors
             # on a circle, and the policy should see them as close.
             parts.append([np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)])
+        if self.config.commands:
+            parts.append(np.zeros(3) if command is None else command)
         return np.concatenate(parts).astype(np.float32)
+
+    # ---------------------------------------------------------------- commands
+
+    def default_command(self) -> np.ndarray:
+        """(forward, sideways, turn) when there are no commands: walk straight at target_speed."""
+        return np.array([self.config.target_speed, 0.0, 0.0])
+
+    def sample_command(self, rng: np.random.Generator) -> np.ndarray:
+        """A random training command (see WalkConfig.commands)."""
+        c = self.config
+        if rng.uniform() < c.command_zero_fraction:
+            return np.zeros(3)
+        forward = rng.uniform(-c.command_max_backward, c.command_max_forward) if rng.uniform() < 0.9 else 0.0
+        sideways = rng.uniform(-c.command_max_sideways, c.command_max_sideways) if rng.uniform() < 0.3 else 0.0
+        turn = rng.uniform(-c.command_max_turn, c.command_max_turn) if rng.uniform() < 0.5 else 0.0
+        return np.array([forward, sideways, turn])
+
+    def clamp_command(self, command) -> np.ndarray:
+        """A command limited to what the policy was trained for."""
+        c = self.config
+        return np.array([
+            min(max(command[0], -c.command_max_backward), c.command_max_forward),
+            min(max(command[1], -c.command_max_sideways), c.command_max_sideways),
+            min(max(command[2], -c.command_max_turn), c.command_max_turn),
+        ])
+
+    @staticmethod
+    def is_moving_command(command: np.ndarray) -> bool:
+        return bool(np.abs(command).max() > 0.05)
 
     # ------------------------------------------------------------------ pushes
 
@@ -491,6 +548,7 @@ class WalkTask:
         succeeded: bool = False,
         jump_airborne: bool = False,
         jump_landed: bool = False,
+        command: np.ndarray | None = None,
     ) -> tuple[float, dict[str, float]]:
         """Reward for one control step, plus each term separately (for logging).
 
@@ -508,10 +566,13 @@ class WalkTask:
         phase: the gait clock at the end of the step (gait_phase()).
         """
         c = self.config
+        command = self.default_command() if command is None else command
+        cmd_vx, cmd_vy, cmd_turn = float(command[0]), float(command[1]), float(command[2])
+        moving = float(not c.commands or self.is_moving_command(command))
         upright = min(max(up_z, 0.0), 1.0) if c.posture_gating else 1.0  # see WalkConfig.posture_gating
         # constraint_gate_speed_error: gait rules pause while knocked off speed
         balanced = float(c.constraint_gate_speed_error <= 0
-                         or math.hypot(vx - c.target_speed, vy) < c.constraint_gate_speed_error)
+                         or math.hypot(vx - cmd_vx, vy - cmd_vy) < c.constraint_gate_speed_error)
         # stillness_speed_gate: calm terms only while not being shoved along
         calm = float(c.stillness_speed_gate <= 0 or math.hypot(vx, vy) < c.stillness_speed_gate)
         is_up = float(up_z > c.upright_gate)
@@ -523,7 +584,7 @@ class WalkTask:
             swinging = ~should_be_down
             if swinging.any():
                 clearance = float(np.mean(np.clip(foot_height[swinging] / c.swing_height, 0.0, 1.0)))
-        speed_error_sq = (vx - c.target_speed) ** 2 + vy**2  # includes drifting sideways
+        speed_error_sq = (vx - cmd_vx) ** 2 + (vy - cmd_vy) ** 2  # includes drifting sideways
         extra_air = np.clip(air_time - c.air_time_target, -c.air_time_target, 0.3)  # capped: no endless lifts
         diagonal_sync = [float(feet_down[a] == feet_down[b]) for a, b in self.diagonal_pairs]
         terms = {
@@ -532,9 +593,9 @@ class WalkTask:
             "upright": c.upright_weight * up_z,
             "trot": c.trot_weight * (float(np.mean(diagonal_sync)) if diagonal_sync else 0.0),
             "air_time": c.air_time_weight * float(np.sum(np.where(landed, extra_air, 0.0))),
-            "gait": c.gait_weight * balanced * gait,
-            "clearance": c.clearance_weight * balanced * clearance,
-            "turn": c.turn_weight * upright * math.exp(-(turn_rate**2) / c.turn_sigma),
+            "gait": c.gait_weight * balanced * moving * gait,
+            "clearance": c.clearance_weight * balanced * moving * clearance,
+            "turn": c.turn_weight * upright * math.exp(-((turn_rate - cmd_turn) ** 2) / c.turn_sigma),
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * float(np.sum((action - last_action) ** 2)),
             "slip": -c.slip_weight * foot_slip,
@@ -550,6 +611,8 @@ class WalkTask:
             "orientation": c.orientation_weight * math.exp(-4.0 * (1.0 - up_z)),
             "hold": c.hold_weight * is_up * at_height * math.exp(-0.5 * float(np.sum(action**2))),
             "stance": c.stance_weight * calm * float(np.mean(feet_down)),
+            "still": c.still_weight * (1.0 - moving) * float(np.mean(feet_down))
+            * math.exp(-float(np.sum(joint_offset**2)) / 0.1),
             "jump": c.jump_weight * float(jump_airborne and not jump_landed) * max(height - self.standing_height, 0.0),
             "rejump": -c.rejump_weight * float(jump_airborne and jump_landed),
             "settle": c.settle_weight * float(jump_landed) * float(np.mean(feet_down))

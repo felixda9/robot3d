@@ -335,6 +335,9 @@ def test_walk_and_stand_modes(tiny_run, tiny_stand_run, tiny_getup_run, tmp_path
 
             ws.send_json({"type": "jump"})
             assert "no jump policy" in receive_until(ws, "error").message
+            ws.send_json({"type": "set_command", "forward": 0.3, "sideways": 0, "turn": 0})
+            assert "steering" in receive_until(ws, "error").message  # tiny isn't steerable
+            assert status.command_limits == (0, 0, 0, 0) and not status.steerable
 
 
 def test_root_page_responds(client):

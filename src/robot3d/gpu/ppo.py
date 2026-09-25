@@ -244,13 +244,25 @@ def train_gpu(
         saved = torch.load(init_from, map_location=dev, weights_only=False)
         if saved.get("format") != CHECKPOINT_FORMAT:
             raise ValueError(f"{init_from}: not a {CHECKPOINT_FORMAT} checkpoint (can only fine-tune our PPO's)")
-        if int(saved["num_obs"]) != env.num_obs or int(saved["num_actions"]) != env.num_actions:
+        extra = env.num_obs - int(saved["num_obs"])
+        if extra < 0 or int(saved["num_actions"]) != env.num_actions:
             raise ValueError(f"{init_from} has {saved['num_obs']} observations / {saved['num_actions']} actions; "
                              f"this robot and task have {env.num_obs} / {env.num_actions}")
         if list(saved["net_arch"]) != list(ppo.net_arch):
             raise ValueError(f"{init_from} has network {saved['net_arch']}, the config {ppo.net_arch}")
-        net.load_state_dict(saved["model"])
-        normalizer.load_state_dict(saved["normalizer"])
+        model, norm = dict(saved["model"]), dict(saved["normalizer"])
+        if extra:
+            # New observations appended at the end (e.g. steering commands):
+            # widen the first layers with zero weights for them, so the network
+            # starts out exactly as the old one and learns to use them.
+            log(f"Fine-tuning with {extra} new observations (their first-layer weights start at 0)")
+            for key in ("actor.0.weight", "critic.0.weight"):
+                pad = torch.zeros(model[key].shape[0], extra, device=model[key].device)
+                model[key] = torch.cat([model[key], pad], dim=1)
+            norm["mean"] = torch.cat([norm["mean"], torch.zeros(extra, device=norm["mean"].device)])
+            norm["var"] = torch.cat([norm["var"], torch.ones(extra, device=norm["var"].device)])
+        net.load_state_dict(model)
+        normalizer.load_state_dict(norm)
         run_info["init_from"] = str(init_from)
         write_run_info(run_dir, run_info)
     reward_scaler = RewardScaler(N, ppo.gamma, dev) if ppo.normalize_rewards else None

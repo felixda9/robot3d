@@ -71,6 +71,10 @@ class PolicyController:
         self.last_action = np.zeros(self.task.num_actions)
         self.steps = 0  # control steps since the (re)start: drives the gait clock
         self._rng = np.random.default_rng()
+        # Steering command (forward, sideways, turn) for policies trained with
+        # commands; zero = stand still. Others walk at their target speed.
+        self.steerable = self.task.config.commands
+        self.command = np.zeros(3) if self.steerable else self.task.default_command()
 
     def reset(self) -> None:
         self.last_action = np.zeros(self.task.num_actions)
@@ -84,7 +88,7 @@ class PolicyController:
     def action(self, data: mujoco.MjData) -> np.ndarray:
         """The policy's action (-1..1 per motor) for the current state."""
         phase = self.task.gait_phase(self.steps)
-        action = self._predict(self.task.observation(data, self.last_action, phase))
+        action = self._predict(self.task.observation(data, self.last_action, phase, self.command))
         self.steps += 1
         self.last_action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         return self.last_action
@@ -209,6 +213,24 @@ class Behaviors:
             raise ValueError(f"no {mode} policy loaded")
         self.mode = mode
         self.reset()
+
+    @property
+    def steerable(self) -> bool:
+        walker = self.policies.get("walk")
+        return walker is not None and walker.steerable
+
+    def command_limits(self) -> tuple[float, float, float, float]:
+        if not self.steerable:
+            return (0.0, 0.0, 0.0, 0.0)
+        c = self.policies["walk"].task.config
+        return (c.command_max_forward, c.command_max_backward, c.command_max_sideways, c.command_max_turn)
+
+    def set_command(self, forward: float, sideways: float, turn: float) -> None:
+        """Steer the walker (clamped to what it was trained for)."""
+        if not self.steerable:
+            raise ValueError("the walk policy doesn't take steering commands (train one with --task steer)")
+        walker = self.policies["walk"]
+        walker.command = walker.task.clamp_command([forward, sideways, turn])
 
     def jump(self) -> None:
         """Start one jump (the jump policy drives until it has landed and settled)."""

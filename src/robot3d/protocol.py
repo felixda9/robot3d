@@ -98,6 +98,8 @@ class StatusMessage(_Message):
     policy_active: bool
     recovering: bool
     jumping: bool
+    steerable: bool
+    command_limits: tuple[float, float, float, float]
 
 
 class ErrorMessage(_Message):
@@ -183,6 +185,13 @@ class JumpCommand(_Message):
     type: Literal["jump"] = "jump"
 
 
+class SetCommandCommand(_Message):
+    type: Literal["set_command"] = "set_command"
+    forward: FiniteFloat
+    sideways: FiniteFloat
+    turn: FiniteFloat
+
+
 ClientMessage = Annotated[
     PlayCommand
     | PauseCommand
@@ -194,7 +203,8 @@ ClientMessage = Annotated[
     | ReleaseCommand
     | PushCommand
     | SetModeCommand
-    | JumpCommand,
+    | JumpCommand
+    | SetCommandCommand,
     Field(discriminator="type"),
 ]
 

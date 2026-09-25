@@ -174,6 +174,30 @@ def test_gait_clock_matches_exactly(snapshots):
     assert down.tolist() == [task.desired_down(p).tolist() for p in expected]
 
 
+def test_commands_in_observations_and_sampling():
+    from robot3d.walk import WalkConfig, WalkTask
+
+    task = WalkTask(WalkEnv("quadruped12").model, WalkConfig.steer())
+    batched = BatchedWalkTask(task, "cpu")
+    commands = batched.sample_commands(4000, torch.Generator().manual_seed(0))
+    c = task.config
+    assert commands.shape == (4000, 3)
+    assert commands[:, 0].min() >= -c.command_max_backward and commands[:, 0].max() <= c.command_max_forward
+    still = (commands.abs().amax(dim=1) == 0).float().mean().item()
+    assert 0.05 < still < 0.25
+    assert (commands[:, 1] != 0).float().mean().item() == pytest.approx(0.3 * 0.9, abs=0.04)  # sideways 30%
+
+    data = mujoco.MjData(task.model)
+    data.qpos[:] = task.standing_qpos
+    mujoco.mj_forward(task.model, data)
+    command = np.array([0.5, -0.2, 0.7])
+    expected = task.observation(data, np.zeros(12), 0.25, command)
+    as_t = lambda x: torch.tensor(np.asarray(x)[None], dtype=torch.float32)  # noqa: E731
+    got = batched.observation(as_t(data.qpos), as_t(data.qvel), as_t(data.xmat[1].reshape(3, 3)),
+                              as_t(np.zeros(12)), torch.tensor([0.25], dtype=torch.float64), as_t(command))
+    torch.testing.assert_close(got[0], torch.tensor(expected), rtol=1e-5, atol=1e-5)
+
+
 def test_jump_update_matches(snapshots):
     task, _ = snapshots
     batched = BatchedWalkTask(task, "cpu")
@@ -205,7 +229,7 @@ def test_air_time_update_matches(snapshots):
 @pytest.mark.parametrize(
     "robot, kind",
     [("quadruped", "stand"), ("quadruped", "getup"), ("quadruped12", "getup"), ("quadruped12", "walk"),
-     ("quadruped12", "stand"), ("quadruped12", "jump")],
+     ("quadruped12", "stand"), ("quadruped12", "jump"), ("quadruped12", "steer")],
 )
 def test_reward_matches_for_other_tasks_and_robots(robot, kind):
     """The stand and get-up tasks, and the 12-motor robot (roll penalty)."""
@@ -228,6 +252,7 @@ def test_reward_matches_for_other_tasks_and_robots(robot, kind):
         "joint_offset": rng.uniform(-1, 1, (N, task.num_actions)),
         "joint_velocity": rng.uniform(-5, 5, (N, task.num_actions)), "angular_velocity": rng.uniform(-2, 2, (N, 3)),
         "jump_airborne": rng.random(N) < 0.5, "jump_landed": rng.random(N) < 0.5,
+        "command": np.stack([task.sample_command(rng) for _ in range(N)]),
     }
     dtypes = {"fell": torch.bool, "feet_down": torch.bool, "landed": torch.bool, "phase": torch.float64,
               "jump_airborne": torch.bool, "jump_landed": torch.bool}

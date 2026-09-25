@@ -170,6 +170,10 @@ export interface StatusMessage {
   recovering: boolean;
   /** The jump policy is doing a jump (until it has landed and settled). */
   jumping: boolean;
+  /** The walk policy follows steering commands (SetCommandCommand). */
+  steerable: boolean;
+  /** Its command limits: max forward, backward, sideways (m/s), turn (rad/s); zeros if not steerable. */
+  command_limits: [number, number, number, number];
 }
 
 /** The server rejected a message from this client. */
@@ -284,6 +288,19 @@ export interface SetModeCommand {
   mode: Mode;
 }
 
+/**
+ * Steer the walk policy (if it's steerable): forward speed (m/s, negative =
+ * backward) and sideways speed (m/s, positive = to its left) in the robot's
+ * heading frame, and turn rate (rad/s, positive = left). Clamped to its
+ * command_limits. All zero = stand still. Resent while the input changes.
+ */
+export interface SetCommandCommand {
+  type: "set_command";
+  forward: number;
+  sideways: number;
+  turn: number;
+}
+
 /** Jump once (needs a jump policy; lets the policies drive). */
 export interface JumpCommand {
   type: "jump";
@@ -300,7 +317,8 @@ export type ClientMessage =
   | ReleaseCommand
   | PushCommand
   | SetModeCommand
-  | JumpCommand;
+  | JumpCommand
+  | SetCommandCommand;
 
 // ================================================================ HTTP API
 // The training dashboard reads runs over plain HTTP (JSON), not the

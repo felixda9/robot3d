@@ -434,6 +434,45 @@ def test_jump_task():
     assert reward_terms(WalkEnv("quadruped").task)["jump"] == 0.0  # other tasks: off
 
 
+def test_steering_commands():
+    from robot3d.walk import WalkConfig
+
+    env = WalkEnv("quadruped12", WalkConfig.steer())
+    task, c = env.task, env.task.config
+    assert c.task == "walk" and c.commands and task.obs_size == 48 + 3  # + (forward, sideways, turn)
+
+    rng = np.random.default_rng(0)
+    commands = np.array([task.sample_command(rng) for _ in range(2000)])
+    assert commands[:, 0].min() >= -c.command_max_backward and commands[:, 0].max() <= c.command_max_forward
+    assert np.abs(commands[:, 2]).max() <= c.command_max_turn
+    still = np.mean(np.abs(commands).max(axis=1) == 0)
+    assert 0.05 < still < 0.25  # 10% "stand still" (+ a few with every part off by chance)
+    assert np.allclose(task.clamp_command([5, -5, 5]), [c.command_max_forward, -c.command_max_sideways,
+                                                       c.command_max_turn])
+
+    def terms(**kw):
+        return task.reward(**{**reward_inputs(task), **kw})[1]
+
+    backward = np.array([-0.3, 0.0, 0.0])
+    assert terms(vx=-0.3, command=backward)["tracking"] == pytest.approx(c.tracking_weight)  # follows the command
+    assert terms(vx=0.4, command=backward)["tracking"] < 0.01 * c.tracking_weight
+    left_turn = np.array([0.3, 0.0, 0.8])
+    assert terms(turn_rate=0.8, command=left_turn)["turn"] == pytest.approx(c.turn_weight)
+    assert terms(turn_rate=0.0, command=left_turn)["turn"] < 0.1 * c.turn_weight
+    stop = np.zeros(3)
+    standing = terms(command=stop, phase=0.3)
+    assert standing["still"] == pytest.approx(c.still_weight) and standing["gait"] == standing["clearance"] == 0.0
+    assert terms(command=np.array([0.4, 0, 0]), phase=0.3)["still"] == 0.0
+
+    # The env draws a new command every command_resample_seconds, observed by the policy.
+    obs, _ = env.reset(seed=1)
+    first = env._command.copy()
+    assert np.allclose(obs[-3:], first)
+    for _ in range(round(c.command_resample_seconds / task.control_dt) + 1):  # (re-drawn at the start of step 251)
+        obs, *_ = env.step(np.zeros(12))
+    assert not np.allclose(env._command, first) and np.allclose(obs[-3:], env._command)
+
+
 def test_gait_rules_pause_while_knocked_off_speed(env):
     c = env.task.config
     assert c.constraint_gate_speed_error == 0.5

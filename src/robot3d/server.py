@@ -49,6 +49,7 @@ from robot3d.protocol import (
     RunDetail,
     RunSummary,
     ScalarsResponse,
+    SetCommandCommand,
     SetCtrlCommand,
     SetModeCommand,
     StatusMessage,
@@ -251,6 +252,8 @@ class SimRunner:
                         if not self.sim.controller_active:
                             self.sim.use_controller(True)
                         self.behaviors.jump()
+                    case SetCommandCommand(forward=forward, sideways=sideways, turn=turn):
+                        self.behaviors.set_command(forward, sideways, turn)
                     case GrabCommand(geom=geom, point=point, target=target):
                         self.sim.grab(geom, point, target)
                     case ReleaseCommand():
@@ -294,6 +297,8 @@ class SimRunner:
             policy_active=self.sim.controller_active,
             recovering=b.recovering and self.sim.controller_active,
             jumping=b.jumping and self.sim.controller_active,
+            steerable=b.steerable,
+            command_limits=b.command_limits(),
         ).model_dump_json()
 
 
@@ -352,6 +357,8 @@ def _refusal(command: ClientMessage, runner: SimRunner) -> str | None:
             return "no jump policy loaded (Watch a jump run in the Training tab)"
         case JumpCommand() if runner.behaviors.recovering:
             return "it's getting up; jump once it stands"
+        case SetCommandCommand() if not runner.behaviors.steerable:
+            return "the walk policy doesn't take steering commands (train one with --task steer)"
         case GrabCommand() | PushCommand():
             model = sim.model
             if command.geom >= model.ngeom:

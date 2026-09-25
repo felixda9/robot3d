@@ -108,6 +108,11 @@ class GpuWalkEnv:
         self.episode_length = torch.zeros(num_envs, dtype=torch.long, device=self.device)
         self.episode_return = torch.zeros(num_envs, device=self.device)
         self.start_xy = torch.zeros((num_envs, 2), device=self.device)
+        # Steering commands (WalkConfig.commands): (forward, sideways, turn) per robot.
+        self.command = torch.zeros((num_envs, 3), device=self.device)
+        self.command[:, 0] = self.task.config.target_speed
+        self.next_command = torch.zeros(num_envs, dtype=torch.long, device=self.device)
+        self._command_steps = round(self.task.config.command_resample_seconds / self.task.control_dt)
         self.next_push = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # episode step of the next shove
         self.steady_steps = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # get-up task
         self.flight_steps = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # jump task
@@ -176,18 +181,23 @@ class GpuWalkEnv:
                 0, self.task.max_steps, (self.num_envs,), generator=self.generator, device=self.device
             )
             self.next_push = self.episode_length + self._push_delays(self.num_envs)
+            self.next_command = self.episode_length + self._command_steps
         self._feet_before = self.task.feet_state(self.geom_xpos)
         return self.observe()
 
     def observe(self) -> torch.Tensor:
         phase = self.task.gait_phase(self.episode_length)
-        return self.task.observation(self.qpos, self.qvel, self.xmat[:, 1], self.last_action, phase)
+        return self.task.observation(self.qpos, self.qvel, self.xmat[:, 1], self.last_action, phase, self.command)
 
     def step(self, actions: torch.Tensor) -> StepResult:
         task = self.task
         actions = actions.clamp(-1.0, 1.0)
         self.ctrl.copy_(task.action_to_ctrl(actions, self.qpos[:, task.joint_qpos]))
         c = task.config
+        if c.commands:  # new commands for robots whose current one has run its time
+            due = self.episode_length >= self.next_command
+            self.command = torch.where(due[:, None], task.sample_commands(self.num_envs, self.generator), self.command)
+            self.next_command = torch.where(due, self.episode_length + self._command_steps, self.next_command)
         if c.push_interval > 0:
             # Shoves (see WalkConfig.push_interval), without a GPU->CPU sync:
             # every robot draws a kick, only those due get it.
@@ -247,7 +257,7 @@ class GpuWalkEnv:
             turn_rate=task.turn_rate(self.qvel), height=self.qpos[:, 2],
             joint_offset=self.qpos[:, task.joint_qpos] - task.home_ctrl,
             joint_velocity=self.qvel[:, task.joint_qvel], angular_velocity=self.qvel[:, 3:6],
-            succeeded=succeeded, jump_airborne=airborne, jump_landed=self.landed,
+            succeeded=succeeded, jump_airborne=airborne, jump_landed=self.landed, command=self.command,
         )
         self.last_action = actions
         self.episode_length += 1
@@ -308,6 +318,9 @@ class GpuWalkEnv:
         self.episode_length[mask] = 0
         self.episode_return[mask] = 0.0
         self.start_xy[mask] = self.qpos[mask, 0:2]
+        if self.task.config.commands:
+            self.command[mask] = self.task.sample_commands(self.num_envs, self.generator)[mask]
+            self.next_command[mask] = self._command_steps
         self.steady_steps[mask] = 0
         self.flight_steps[mask] = 0
         self.landed[mask] = False

@@ -186,6 +186,32 @@ def test_force_pushes_on_the_gpu():
     assert max_speed.mean() > 0.15  # they moved
 
 
+def test_steering_on_the_gpu_and_fine_tuning_onto_new_inputs(tmp_path):
+    from robot3d.gpu.env import GpuWalkEnv
+    from robot3d.gpu.ppo import GpuPPOConfig, TorchPolicy, train_gpu
+    from robot3d.runs import list_checkpoints
+    from robot3d.walk import WalkConfig
+
+    env = GpuWalkEnv(num_envs=64, robot="quadruped12", config=WalkConfig.steer(), device="cuda:0", seed=7)
+    obs = env.reset(randomize_episode_start=False)
+    assert torch.allclose(obs[:, -3:], env.command)
+    first = env.command.clone()
+    for _ in range(round(env.task.config.command_resample_seconds / env.task.control_dt) + 1):
+        result = env.step(torch.zeros((env.num_envs, env.num_actions), device=env.device))
+    assert not torch.allclose(env.command, first)  # new commands, observed
+    assert torch.allclose(result.obs[~result.done, -3:], env.command[~result.done])
+
+    # A walker without commands, fine-tuned into a steerable one: its first layers grow.
+    def tiny(name, walk, **kwargs):
+        return train_gpu(total_steps=256 * 24 * 2, name=name, checkpoint_every=256 * 24, robot="quadruped12",
+                         walk=walk, ppo=GpuPPOConfig(num_envs=256), runs_dir=tmp_path, log=lambda *_: None, **kwargs)
+
+    plain = list_checkpoints(tiny("plain", WalkConfig()))[-1].model_path
+    steer_dir = tiny("steer", WalkConfig.steer(), init_from=plain)
+    policy = TorchPolicy(list_checkpoints(steer_dir)[-1].model_path)
+    assert policy.num_obs == TorchPolicy(plain).num_obs + 3
+
+
 def test_tiny_rsl_training_run_plays_in_cpu_mujoco(tmp_path):
     from robot3d.gpu.rsl import RslConfig, train_rsl
     from robot3d.policy import PolicyController

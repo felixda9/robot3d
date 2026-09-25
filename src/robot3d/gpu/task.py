@@ -53,6 +53,23 @@ class BatchedWalkTask:
 
     # ----------------------------------------------------------------- actions
 
+    def sample_commands(self, n: int, generator: torch.Generator) -> torch.Tensor:
+        """(n, 3) random training commands, as WalkTask.sample_command."""
+        c = self.config
+
+        def uniform(low, high):
+            return low + (high - low) * torch.rand(n, generator=generator, device=self.device)
+
+        def sometimes(p):
+            return (torch.rand(n, generator=generator, device=self.device) < p).float()
+
+        command = torch.stack([
+            uniform(-c.command_max_backward, c.command_max_forward) * sometimes(0.9),
+            uniform(-c.command_max_sideways, c.command_max_sideways) * sometimes(0.3),
+            uniform(-c.command_max_turn, c.command_max_turn) * sometimes(0.5),
+        ], dim=1)
+        return command * (1.0 - sometimes(c.command_zero_fraction))[:, None]
+
     def action_to_ctrl(self, actions: torch.Tensor, joint_pos: torch.Tensor | None = None) -> torch.Tensor:
         """(N, nu) actions in -1..1 -> (N, nu) motor targets (see WalkTask)."""
         base = joint_pos if self.config.action_mode == "relative" else self.home_ctrl
@@ -68,6 +85,7 @@ class BatchedWalkTask:
         torso_rot: torch.Tensor,
         last_action: torch.Tensor,
         phase: torch.Tensor | None = None,
+        command: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """(N, obs_size) observations. torso_rot: (N, 3, 3) torso-to-world
         rotations; phase: (N,) gait clock (gait_phase())."""
@@ -86,6 +104,8 @@ class BatchedWalkTask:
         if self.clock:
             angle = 2 * torch.pi * phase
             parts.append(torch.stack([angle.sin(), angle.cos()], dim=1).float())
+        if self.config.commands:
+            parts.append(command if command is not None else torch.zeros((qpos.shape[0], 3), device=qpos.device))
         return torch.cat(parts, dim=1)
 
     # -------------------------------------------------------------- gait clock
@@ -124,11 +144,20 @@ class BatchedWalkTask:
         succeeded: torch.Tensor | None = None,
         jump_airborne: torch.Tensor | None = None,
         jump_landed: torch.Tensor | None = None,
+        command: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """(N,) rewards and (N,) per-term values, same terms as WalkTask.reward.
         feet_down, landed: (N, feet) bool; air_time, foot_height: (N, feet);
         phase: (N,) float64."""
         c = self.config
+        if command is None:
+            command = torch.zeros((vx.shape[0], 3), device=vx.device)
+            command[:, 0] = c.target_speed
+        cmd_vx, cmd_vy, cmd_turn = command[:, 0], command[:, 1], command[:, 2]
+        if c.commands:
+            moving = (command.abs().amax(dim=1) > 0.05).float()
+        else:
+            moving = torch.ones_like(vx)
         upright = up_z.clamp(0.0, 1.0) if c.posture_gating else torch.ones_like(up_z)  # see WalkConfig
         if c.stillness_speed_gate > 0:
             calm = (torch.sqrt(vx**2 + vy**2) < c.stillness_speed_gate).float()
@@ -136,7 +165,7 @@ class BatchedWalkTask:
             calm = torch.ones_like(vx)
         is_up = (up_z > c.upright_gate).float()
         if c.constraint_gate_speed_error > 0:
-            balanced = (torch.sqrt((vx - c.target_speed) ** 2 + vy**2) < c.constraint_gate_speed_error).float()
+            balanced = (torch.sqrt((vx - cmd_vx) ** 2 + (vy - cmd_vy) ** 2) < c.constraint_gate_speed_error).float()
         else:
             balanced = torch.ones_like(vx)
         at_height = (height > c.height_gate * self.standing_height).float()
@@ -148,7 +177,7 @@ class BatchedWalkTask:
             clearance = (lift * swinging).sum(dim=1) / swinging.sum(dim=1).clamp(min=1.0)  # 0 if none swings
         else:
             gait = clearance = torch.zeros_like(vx)
-        speed_error_sq = (vx - c.target_speed) ** 2 + vy**2
+        speed_error_sq = (vx - cmd_vx) ** 2 + (vy - cmd_vy) ** 2
         extra_air = (air_time - c.air_time_target).clamp(-c.air_time_target, 0.3)
         if self.has_pairs:
             trot = (feet_down[:, self.pair_a] == feet_down[:, self.pair_b]).float().mean(dim=1)
@@ -160,9 +189,9 @@ class BatchedWalkTask:
             "upright": c.upright_weight * up_z,
             "trot": c.trot_weight * trot,
             "air_time": c.air_time_weight * torch.where(landed, extra_air, torch.zeros_like(extra_air)).sum(dim=1),
-            "gait": c.gait_weight * balanced * gait,
-            "clearance": c.clearance_weight * balanced * clearance,
-            "turn": c.turn_weight * upright * torch.exp(-(turn_rate**2) / c.turn_sigma),
+            "gait": c.gait_weight * balanced * moving * gait,
+            "clearance": c.clearance_weight * balanced * moving * clearance,
+            "turn": c.turn_weight * upright * torch.exp(-((turn_rate - cmd_turn) ** 2) / c.turn_sigma),
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * ((action - last_action) ** 2).sum(dim=1),
             "slip": -c.slip_weight * foot_slip,
@@ -178,6 +207,8 @@ class BatchedWalkTask:
             "orientation": c.orientation_weight * torch.exp(-4.0 * (1.0 - up_z)),
             "hold": c.hold_weight * is_up * at_height * torch.exp(-0.5 * (action**2).sum(dim=1)),
             "stance": c.stance_weight * calm * feet_down.float().mean(dim=1),
+            "still": (c.still_weight * (1.0 - moving) * feet_down.float().mean(dim=1)
+                      * torch.exp(-(joint_offset**2).sum(dim=1) / 0.1)),
         }
         up_in_air = jump_airborne.float() if jump_airborne is not None else torch.zeros_like(vx)
         has_landed = jump_landed.float() if jump_landed is not None else torch.zeros_like(vx)
