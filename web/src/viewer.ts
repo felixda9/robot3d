@@ -134,6 +134,11 @@ export class Viewer {
     if (count > 0) this.focus.divideScalar(count);
   }
 
+  /** Stop drawing while the view is hidden (e.g. the dashboard is open). */
+  setActive(active: boolean): void {
+    this.renderer.setAnimationLoop(active ? () => this.render() : null);
+  }
+
   /**
    * Follow camera: the camera moves along with the robot (horizontally only,
    * so it doesn't bob with every step); you can still orbit and zoom.

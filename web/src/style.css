@@ -360,6 +360,61 @@ button:disabled {
   font-size: 12px;
 }
 
+/* ------------------------------------------------------------ tabs, toast */
+
+#tabs {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  z-index: 10;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  transform: translateX(-50%);
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 9px;
+  backdrop-filter: blur(6px);
+}
+
+#tabs a {
+  padding: 5px 14px;
+  border-radius: 6px;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+#tabs a:hover {
+  color: var(--text);
+}
+
+#tabs a.active {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+}
+
+#toast {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  z-index: 20;
+  max-width: min(560px, 90vw);
+  padding: 8px 14px;
+  transform: translateX(-50%);
+  border-radius: 8px;
+  background: #2b1a1a;
+  border: 1px solid var(--bad);
+  font-size: 13px;
+}
+
+body.view-training #panel,
+body.view-training #motors,
+body.view-training #help,
+body.view-training #viewport {
+  display: none;
+}
+
 #help {
   position: fixed;
   bottom: 10px;

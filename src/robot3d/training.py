@@ -16,6 +16,7 @@ but only a little per update ("proximal"), so learning doesn't lurch. Repeat.
 import json
 import os
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -28,9 +29,8 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
 from robot3d.envs import WalkEnv
+from robot3d.runs import RUNS_DIR
 from robot3d.walk import WalkConfig
-
-RUNS_DIR = Path(__file__).resolve().parents[2] / "runs"
 
 
 def default_run_name(robot: str) -> str:
@@ -85,6 +85,31 @@ class CheckpointEvery(BaseCallback):
         return path
 
 
+class Heartbeat(BaseCallback):
+    """Rewrite run.json with progress every `every` seconds. The dashboard
+    tells a running run from a crashed one by how recently it changed."""
+
+    def __init__(self, run_dir: Path, run_info: dict, every: float = 30.0):
+        super().__init__()
+        self.run_dir = run_dir
+        self.run_info = run_info
+        self.every = every
+        self._last = 0.0
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_rollout_end(self) -> None:
+        now = time.monotonic()
+        if now - self._last >= self.every:
+            self._last = now
+            self.run_info.update(steps_done=int(self.num_timesteps), updated=_now())
+            try:
+                _write_json(self.run_dir / "run.json", self.run_info)
+            except OSError:
+                pass  # never crash training over a progress note; next beat retries
+
+
 class EpisodeStats(BaseCallback):
     """Log walk-specific numbers to TensorBoard next to SB3's own
     (rollout/ep_rew_mean etc.): per-episode distance, speed and falls, and
@@ -135,7 +160,7 @@ def train(
     run_info = {
         "robot": robot,
         "task": "walk",
-        "started": datetime.now().isoformat(timespec="seconds"),
+        "started": _now(),
         "command": " ".join(sys.argv),
         "total_steps": total_steps,
         "n_envs": n_envs,
@@ -178,15 +203,16 @@ def train(
     control_dt = walk.control_dt
     checkpoints = CheckpointEvery(checkpoint_dir, checkpoint_every)
     interrupted = False
+    callbacks = [checkpoints, EpisodeStats(control_dt), Heartbeat(run_dir, run_info)]
     try:
-        model.learn(total_steps, callback=[checkpoints, EpisodeStats(control_dt)], tb_log_name="ppo")
+        model.learn(total_steps, callback=callbacks, tb_log_name="ppo")
     except KeyboardInterrupt:
         interrupted = True
     finally:
         final = checkpoints.save()
         envs.close()
         run_info.update(
-            finished=datetime.now().isoformat(timespec="seconds"),
+            finished=_now(),
             steps_done=int(model.num_timesteps),
             interrupted=interrupted,
             final_checkpoint=str(final.relative_to(run_dir)),
@@ -195,5 +221,20 @@ def train(
     return run_dir
 
 
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
 def _write_json(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    # Write a temp file, then swap it in, so a reader (the dashboard) never
+    # sees a half-written run.json. On Windows the swap fails while another
+    # process has the file open for that instant, so retry briefly.
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    for _ in range(40):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+    tmp.replace(path)  # last try: let the error surface

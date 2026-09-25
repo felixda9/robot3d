@@ -17,7 +17,10 @@
  *   connect -> server sends SceneMessage, StatusMessage, latest FrameMessage
  *           -> then a FrameMessage ~60 times per second while the sim runs
  *              (and whenever motor targets change)
- *   client  -> sends ClientMessage commands (play / pause / reset / set_ctrl / use_policy)
+ *   client  -> sends ClientMessage commands (play / pause / reset / set_ctrl /
+ *              use_policy / load_policy)
+ *
+ * The HTTP API for the training dashboard is at the end of this file.
  *
  * Per-motor arrays (FrameMessage.ctrl etc., KeyframeInfo.ctrl) are in
  * actuator order, the order of SceneMessage.actuators.
@@ -201,4 +204,100 @@ export interface UsePolicyCommand {
   active: boolean;
 }
 
-export type ClientMessage = PlayCommand | PauseCommand | ResetCommand | SetCtrlCommand | UsePolicyCommand;
+/**
+ * Load a checkpoint from the runs folder and let it drive (replaces any
+ * loaded policy; the robot restarts standing). Names, not paths, e.g.
+ * { run: "walk_10m", checkpoint: "step_009000012" }. The run must be for the
+ * robot the server simulates.
+ */
+export interface LoadPolicyCommand {
+  type: "load_policy";
+  run: string;
+  checkpoint: string;
+}
+
+export type ClientMessage =
+  | PlayCommand
+  | PauseCommand
+  | ResetCommand
+  | SetCtrlCommand
+  | UsePolicyCommand
+  | LoadPolicyCommand;
+
+// ================================================================ HTTP API
+// The training dashboard reads runs over plain HTTP (JSON), not the
+// WebSocket: it's request/response data, not a live stream.
+//   GET  /api/runs                      -> RunSummary[]
+//   GET  /api/runs/{run}                -> RunDetail
+//   GET  /api/runs/{run}/scalars?tags=a,b -> ScalarsResponse
+//   POST /api/runs/{run}/evaluate       -> EvaluateResponse
+
+/** running: still writing; finished: completed; stopped: interrupted or crashed. */
+export type RunStatus = "running" | "finished" | "stopped";
+
+export interface RunSummary {
+  /** Folder name under runs/. */
+  name: string;
+  robot: string;
+  status: RunStatus;
+  /** ISO timestamps; finished is "" while running or if it crashed. */
+  started: string;
+  finished: string;
+  steps_done: number;
+  total_steps: number;
+  n_envs: number;
+  checkpoints: number;
+}
+
+/** A checkpoint measured headless without exploration noise (mean over episodes). */
+export interface EvaluationInfo {
+  episodes: number;
+  /** Meters walked forward per episode. */
+  distance: number;
+  /** m/s. */
+  speed: number;
+  /** Episodes that ended by falling. */
+  falls: number;
+  /** Mean total reward per episode. */
+  mean_return: number;
+}
+
+export interface CheckpointInfo {
+  /** e.g. "step_009000012" (load it with LoadPolicyCommand). */
+  name: string;
+  steps: number;
+  /** null until evaluated (POST /api/runs/{run}/evaluate). */
+  evaluation: EvaluationInfo | null;
+}
+
+/** One training setting, preformatted for display. */
+export interface SettingInfo {
+  group: string;
+  key: string;
+  value: string;
+}
+
+export interface RunDetail {
+  summary: RunSummary;
+  checkpoints: CheckpointInfo[];
+  settings: SettingInfo[];
+  /** Checkpoints of this run waiting for or in evaluation. */
+  evaluating: number;
+}
+
+/** One TensorBoard curve: value at each logged training step. */
+export interface ScalarSeries {
+  tag: string;
+  steps: number[];
+  values: number[];
+}
+
+export interface ScalarsResponse {
+  run: string;
+  series: ScalarSeries[];
+}
+
+export interface EvaluateResponse {
+  /** Checkpoints newly queued for evaluation. */
+  queued: number;
+}

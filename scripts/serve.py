@@ -32,7 +32,7 @@ def main() -> None:
     if robot is None:
         robot = "quadruped"
         if args.policy:
-            from robot3d.policy import find_checkpoint
+            from robot3d.runs import find_checkpoint
 
             robot = find_checkpoint(args.policy).run_info()["robot"]
 

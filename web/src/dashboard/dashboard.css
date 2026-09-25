@@ -1,0 +1,447 @@
+/* Training dashboard. Chart colors: the dataviz reference palette (dark
+   steps), validated against --chart-surface with the skill's validator:
+   all checks pass (worst adjacent CVD dE 8.4, normal-vision 19.3, >= 3:1). */
+#dashboard {
+  --chart-surface: #141a22;
+  --page: #0d1117;
+  --ink: #e6edf3;
+  --ink-2: #b8c2cc;
+  --ink-muted: #8b98a5;
+  --grid: #252d38;
+  --baseline: #3a4453;
+  --border: rgba(255, 255, 255, 0.08);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --status-good: #0ca30c;
+  --status-serious: #ec835a;
+
+  /* Scrolls below the tab bar, so content never slides under it. */
+  position: fixed;
+  inset: 54px 0 0;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  gap: 20px;
+  padding: 6px 20px 24px;
+  overflow-y: auto;
+  background: var(--page);
+  color: var(--ink);
+}
+
+body.view-training {
+  background: #0d1117; /* the band behind the tab bar */
+}
+
+#dashboard[hidden] {
+  display: none;
+}
+
+#dashboard h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+#dashboard h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+#dashboard .hint {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+/* --------------------------------------------------------------- runs list */
+
+.runs {
+  position: sticky;
+  top: 0;
+  align-self: start;
+}
+
+.run-row {
+  display: grid;
+  grid-template-columns: auto 10px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 8px;
+}
+
+.run-row.selected {
+  background: var(--chart-surface);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.run-row input {
+  accent-color: var(--ink-2);
+  margin: 0;
+}
+
+.swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.run-name {
+  all: unset;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.run-name:hover,
+.run-name:focus-visible {
+  text-decoration: underline;
+}
+
+.run-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.pill {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 17px;
+  border: 1px solid var(--baseline);
+  color: var(--ink-2);
+}
+
+.status-running {
+  border-color: var(--series-1);
+}
+
+.status-running::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--series-1);
+  vertical-align: 1px;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.status-stopped {
+  border-color: var(--status-serious);
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* ------------------------------------------------------------- run detail */
+
+.run-detail {
+  min-width: 0;
+}
+
+.detail-head p {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.tile {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--chart-surface);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.tile-label {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.tile-value {
+  margin: 4px 0 2px;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.tile-note {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+/* ------------------------------------------------------------------ charts */
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.chart {
+  padding: 12px 14px 8px;
+  border-radius: 10px;
+  background: var(--chart-surface);
+  box-shadow: inset 0 0 0 1px var(--border);
+  transition: opacity 0.2s;
+}
+
+.chart.loading {
+  opacity: 0.6; /* refetch keeps the frame */
+}
+
+.chart header p {
+  margin: 2px 0 6px;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.chart-legend[hidden] {
+  display: none;
+}
+
+.chart-legend i,
+.tt-row i {
+  display: inline-block;
+  width: 14px;
+  height: 2px;
+  margin-right: 6px;
+  border-radius: 1px;
+  vertical-align: middle;
+}
+
+.chart-plot {
+  position: relative;
+  outline: none;
+}
+
+.chart-plot:focus-visible {
+  box-shadow: 0 0 0 2px var(--series-1);
+  border-radius: 4px;
+}
+
+.chart-plot svg {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+
+.chart-grid {
+  stroke: var(--grid);
+  stroke-width: 1;
+}
+
+.chart-axis {
+  stroke: var(--baseline);
+  stroke-width: 1;
+}
+
+.chart-tick {
+  fill: var(--ink-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-empty {
+  fill: var(--ink-muted);
+  font-size: 13px;
+}
+
+.chart-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.chart-crosshair {
+  stroke: var(--ink-muted);
+  stroke-width: 1;
+}
+
+.chart-dot {
+  stroke: var(--chart-surface); /* 2px surface ring */
+  stroke-width: 2;
+}
+
+.chart-tooltip {
+  position: absolute;
+  top: 4px;
+  z-index: 2;
+  min-width: 140px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #0b0f14;
+  box-shadow: 0 0 0 1px var(--border), 0 4px 14px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.tt-head {
+  margin-bottom: 4px;
+  color: var(--ink-muted);
+}
+
+.tt-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.tt-row strong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.tt-row span {
+  color: var(--ink-2);
+}
+
+.chart-table summary,
+.settings summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.chart-table table,
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-table th,
+.chart-table td,
+.data-table th,
+.data-table td {
+  padding: 5px 8px;
+  text-align: right;
+  border-bottom: 1px solid var(--grid);
+  white-space: nowrap;
+}
+
+.chart-table th:first-child,
+.chart-table td:first-child,
+.data-table th:first-child,
+.data-table td:first-child {
+  text-align: left;
+}
+
+.chart-table th,
+.data-table th {
+  color: var(--ink-muted);
+  font-weight: 500;
+}
+
+/* ------------------------------------------------------------- checkpoints */
+
+.checkpoints {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--chart-surface);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.section-head button,
+.data-table button {
+  flex: none;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.data-table tr.best td {
+  background: rgba(12, 163, 12, 0.08);
+}
+
+.best-pill {
+  border-color: var(--status-good);
+  color: var(--ink);
+}
+
+/* ---------------------------------------------------------------- settings */
+
+.settings {
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--chart-surface);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.settings-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 4px 20px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.settings-body div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink-muted);
+}
+
+.settings-body code {
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+@media (max-width: 800px) {
+  #dashboard {
+    grid-template-columns: 1fr;
+  }
+  .runs {
+    position: static;
+  }
+  .charts {
+    grid-template-columns: 1fr;
+  }
+}

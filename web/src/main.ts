@@ -1,5 +1,6 @@
 import "./style.css";
 import { Connection, defaultSocketUrl } from "./connection";
+import { Dashboard } from "./dashboard/dashboard";
 import { MotorPanel } from "./motors";
 import type { ServerMessage, StatusMessage } from "./protocol";
 import { Viewer } from "./viewer";
@@ -24,6 +25,9 @@ const ui = {
   streamFps: element<HTMLSpanElement>("stream-fps"),
   motors: element<HTMLDivElement>("motors"),
   help: element<HTMLDivElement>("help"),
+  dashboard: element<HTMLDivElement>("dashboard"),
+  toast: element<HTMLDivElement>("toast"),
+  tabs: [...document.querySelectorAll<HTMLAnchorElement>("#tabs a")],
 };
 
 const viewer = new Viewer(ui.viewport);
@@ -69,6 +73,7 @@ function handleMessage(message: ServerMessage): void {
       break;
     case "error":
       console.error("server:", message.message);
+      showToast(message.message);
       break;
     default: {
       // Exhaustiveness check: if protocol.ts gains a new message type, this
@@ -123,9 +128,46 @@ ui.follow.addEventListener("change", () => {
   ui.follow.blur();
 });
 
-// Keyboard shortcuts. Modifier combos (Ctrl+R etc.) stay with the browser.
+// ------------------------------------------------------------ views + toast
+
+const dashboard = new Dashboard(ui.dashboard, {
+  onWatch(run, checkpoint) {
+    connection.send({ type: "load_policy", run, checkpoint });
+    location.hash = "#sim";
+  },
+});
+
+type View = "sim" | "training";
+let view: View | null = null;
+
+function showView(next: View): void {
+  if (next === view) return;
+  view = next;
+  document.body.classList.toggle("view-training", next === "training");
+  ui.dashboard.hidden = next !== "training";
+  for (const tab of ui.tabs) tab.classList.toggle("active", tab.dataset.view === next);
+  viewer.setActive(next === "sim"); // don't draw 3D behind the dashboard
+  if (next === "training") dashboard.show();
+  else dashboard.hide();
+}
+
+// The view lives in the URL (#sim / #training), so reloading keeps it.
+const viewFromHash = (): View => (location.hash === "#training" ? "training" : "sim");
+window.addEventListener("hashchange", () => showView(viewFromHash()));
+showView(viewFromHash());
+
+let toastTimer: number | undefined;
+function showToast(text: string): void {
+  ui.toast.textContent = text;
+  ui.toast.hidden = false;
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => (ui.toast.hidden = true), 5000);
+}
+
+// Keyboard shortcuts (simulator view only). Modifier combos (Ctrl+R etc.)
+// stay with the browser.
 window.addEventListener("keydown", (event) => {
-  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (view !== "sim" || event.ctrlKey || event.metaKey || event.altKey) return;
   const key = event.key.toLowerCase();
   if (key === " ") {
     event.preventDefault(); // don't scroll or press a focused button

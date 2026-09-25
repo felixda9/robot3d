@@ -6,62 +6,16 @@
     sim.set_controller(controller)                     # the policy now drives the motors
 """
 
-import json
 import pickle
-import re
-from dataclasses import dataclass
-from pathlib import Path
 
 import mujoco
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
 
+# Checkpoint discovery lives in runs.py (no PyTorch); re-exported here.
+from robot3d.runs import Checkpoint, find_checkpoint, list_checkpoints  # noqa: F401
 from robot3d.walk import WalkConfig, WalkTask
-
-_STEP_FILE = re.compile(r"step_(\d+)\.zip$")
-
-
-@dataclass(frozen=True)
-class Checkpoint:
-    model_path: Path  # checkpoints/step_XXXXXXXXX.zip (the neural network)
-    run_dir: Path
-
-    @property
-    def steps(self) -> int:
-        return int(_STEP_FILE.search(self.model_path.name).group(1))
-
-    @property
-    def normalizer_path(self) -> Path:
-        return self.model_path.with_name(self.model_path.stem + "_vecnormalize.pkl")
-
-    @property
-    def label(self) -> str:
-        return f"{self.run_dir.name} @ {self.steps:,} steps"
-
-    def run_info(self) -> dict:
-        return json.loads((self.run_dir / "run.json").read_text())
-
-
-def list_checkpoints(run_dir: Path) -> list[Checkpoint]:
-    """A run's checkpoints, oldest first."""
-    paths = sorted((run_dir / "checkpoints").glob("step_*.zip"))
-    return [Checkpoint(p, run_dir) for p in paths if _STEP_FILE.search(p.name)]
-
-
-def find_checkpoint(path: str | Path) -> Checkpoint:
-    """A checkpoint .zip, or a run folder (-> its newest checkpoint)."""
-    path = Path(path)
-    if path.is_file():
-        if not _STEP_FILE.search(path.name):
-            raise ValueError(f"Not a checkpoint file (expected step_<N>.zip): {path}")
-        return Checkpoint(path, path.parent.parent)
-    if path.name == "checkpoints":
-        path = path.parent
-    checkpoints = list_checkpoints(path)
-    if not checkpoints:
-        raise FileNotFoundError(f"No checkpoints in {path} (expected {path / 'checkpoints' / 'step_<N>.zip'})")
-    return checkpoints[-1]
 
 
 class PolicyController:

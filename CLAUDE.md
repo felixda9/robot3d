@@ -83,6 +83,8 @@ MuJoCo is the physics engine; everything around it is built here.
     `--envs`, `--name`, `--seed`); Ctrl+C stops and still saves a checkpoint
   - `uv run tensorboard --logdir runs`: training curves on http://localhost:6006
   - `uv run scripts/evaluate.py runs/<name> [--all]`: headless distance/speed/falls
+    (also caches results for the dashboard)
+  - Training dashboard: the **Training** tab (`#training`) of the web UI
   - `cd web; npm run build`: type-check (`tsc`) + production build to `web/dist/`
   - `cd web; npm run typecheck`: type-check only
 
@@ -99,7 +101,9 @@ src/robot3d/
   walk.py               WalkTask/WalkConfig: observation, action, reward (shared!)
   envs.py               WalkEnv (Gymnasium), registered as robot3d/Walk-v0
   training.py           train(): PPO, run folders, checkpoints, TensorBoard metrics
-  policy.py             find_checkpoint(), PolicyController (plays a policy), evaluate()
+  runs.py               run folders for the dashboard: list/status/checkpoints/curves/
+                        eval cache; Checkpoint + find_checkpoint (no PyTorch import)
+  policy.py             PolicyController (plays a policy), evaluate()
 scripts/                view_mujoco.py, serve.py, train.py, evaluate.py
 tests/                  pytest (conftest.py: a tiny real training run, shared)
 runs/<name>/            training output (gitignored): run.json, tb/, checkpoints/
@@ -109,7 +113,9 @@ web/                    Vite + TypeScript + three.js frontend
   src/viewer.ts         three.js scene: camera, lights, ground, sky, geoms
   src/geoms.ts          MuJoCo geom -> three.js mesh, pose helpers
   src/motors.ts         motor panel: sliders, pose presets, torque bars
-  src/main.ts           wiring + UI (buttons, stats, keyboard shortcuts)
+  src/api.ts            typed fetch client for the HTTP API
+  src/dashboard/        training dashboard (dashboard.ts, linechart.ts SVG charts, css)
+  src/main.ts           wiring + UI (views/tabs, buttons, stats, shortcuts, toast)
   vite.config.ts        dev server + /ws proxy
 ```
 
@@ -129,7 +135,7 @@ web/                    Vite + TypeScript + three.js frontend
   velocity and staying upright; penalize energy use and falling). PPO training
   script with parallel envs, checkpoints, TensorBoard logs. Load any checkpoint
   and watch it in the web viewer.
-- [ ] **5. Training dashboard:** training curves, checkpoint list, and replay of
+- [x] **5. Training dashboard:** training curves, checkpoint list, and replay of
   any checkpoint in the web UI.
 - [ ] **6. Robot designer:** simple YAML/JSON robot spec (body parts, joints,
   motors) → generated MJCF; then a visual editor in the browser.
@@ -299,55 +305,94 @@ web/                    Vite + TypeScript + three.js frontend
     but still show its targets moving live.
 - **2026-09-24: Follow camera** (checkbox + F, on by default): camera and orbit
   target move with the robot's center, horizontally only (no bobbing).
+- **2026-09-24: Dashboard data over HTTP, not the WebSocket** (request/response
+  data, not a stream):
+  - `GET /api/runs`, `GET /api/runs/{run}`, `GET /api/runs/{run}/scalars?tags=`,
+    `POST /api/runs/{run}/evaluate`.
+  - Its types live in the same `protocol.ts` (section "HTTP API"), mirrored in
+    protocol.py, and the contract test covers them.
+  - Run/checkpoint names are validated as plain names (no paths) on both
+    the HTTP and WS sides.
+  - Vite proxies `/api` too; `ROBOT3D_BACKEND` is now `host:port`.
+- **2026-09-24: Run status:**
+  - `finished` / `stopped` come from run.json.
+  - An unfinished run counts as `running` while run.json or its TB events
+    changed within 120 s; training rewrites run.json every ~30 s
+    (Heartbeat callback, atomic write with retries for Windows).
+- **2026-09-24: Curves:** ScalarReader keeps one EventAccumulator per event
+  folder and reloads incrementally (walk_10m: 440 ms cold, 7 ms warm).
+  NaN/inf values are dropped; capped at 1500 points per series.
+- **2026-09-24: Checkpoint evaluations cached** as
+  `checkpoints/step_N_eval.json`. The dashboard's "Evaluate" queues missing
+  ones on a single background thread; evaluate.py writes the cache too. The
+  best checkpoint = highest mean return.
+- **2026-09-24: load_policy** WS command `{run, checkpoint}`: loads on a
+  worker thread (PyTorch), then swaps the controller in on the sim thread
+  (robot restarts standing). The dashboard's "Watch" = load_policy + switch
+  to the Simulator tab.
+- **2026-09-24: Charts** are a small in-house SVG component (`linechart.ts`),
+  following the dataviz skill:
+  - 2px lines, hairline solid grid, snapping crosshair with one tooltip
+    listing every series, legend only for 2+ series, keyboard arrows,
+    "Show data" table view, and a log y-axis for KL.
+  - Palette: the reference dark categorical slots, validated against our
+    chart surface #141a22 (all checks pass).
+  - A run keeps its color slot while checked; up to 8 runs overlaid.
+  - The reward-terms chart shows the selected run only.
 
 ## Current status
 
-**Milestone 4 done (2026-09-24), waiting for the user to test.** (M3
-confirmed by the user.)
-- The user chose CPU-only torch. They first asked for a smoke test only
-  (`runs/smoke`, 300k steps, 68 s), then asked me to run the full training.
+**Milestone 5 done (2026-09-24), waiting for the user to test.** (M4
+confirmed by the user, who then asked me to run the full training.)
 - **First full run `runs/walk_10m`** (10M steps, 14 envs, 33m49s, ~4.9k steps/s):
   - The robot learned a **canter** by ~4M steps: 3-beat, RR → FR+RL together
     → FL, airborne ~30–34% of the cycle, ~4.2 steps/s per foot.
   - No falls at any checkpoint in deterministic evaluation (5 episodes each).
   - Return plateaus ~1420 from 4.5M on.
-  - **Best: step_009000012**, 1.43 m/s (28.7 m in 20 s), return 1423.5,
-    31 W mean motor power (58 W at 1M, 42 W at 4M).
-  - The newest checkpoint (10,006,528) is weaker (1.17 m/s, return 1379).
-    `--policy runs/walk_10m` picks the newest, so pass the 9M .zip explicitly.
+  - Best by return: 6.0M (1425, 1.36 m/s); 9M is a tie within noise
+    (1423.5, 1.43 m/s, 31 W mean motor power vs 58 W at 1M).
+  - The newest checkpoint (10.01M) is weaker (1379).
   - Gait at 1M: front legs hopped together and RL skittered (19
     touchdowns/s, 0.41 m/s slip). Gone by 4M.
   - Remaining flaw: feet slide ~0.25 m/s while touching the floor.
-- **PPO instability found:** approx_kl spiked late in training (1.2 at
-  4.5M, 2.7 at 5M, 4.7 at 6M, 6.5 at 7.08M; 14 updates > 0.05; clip fraction
-  ~0.3).
-  - Cause: the policy std collapsed to 0.064 (from 0.37) while lr stayed at
-    3e-4, so small action changes = huge KL.
-  - Snapshots right after spikes were bad: 2.5M (0.13 m/s) and 7.0M
-    (0.56 m/s). Training recovered each time.
+- **PPO instability (full-run numbers, from TensorBoard):**
+  - approx_kl above 0.05 in **114** of 697 updates, **max 50.5** (at 9.48M);
+    spikes grew through the whole second half. (An earlier mid-run count said
+    14 / max 6.5; that only covered the log up to 7.1M.) Clip fraction ~0.3.
+  - Cause: the policy std collapsed to ~0.04–0.06 (from 0.37) with lr fixed
+    at 3e-4, so small action changes = huge KL.
+  - Snapshots right after spikes were bad: 2.5M (0.13 m/s), 7.0M (0.56 m/s).
   - **Suggested fixes for the next run** (not applied yet; user to decide):
     `target_kl≈0.02`, linear lr decay, possibly a std floor or a small
     ent_coef, and a foot-slip penalty in the reward.
-- Web verified in headless Edge: the policy walks 2.9 m in 8 s; sliders
-  are locked and move with it; P and F work; no console errors.
-- TensorBoard serves all SB3 and custom scalars.
-- Tests: 47 passing (includes a tiny real training run), `tsc` clean.
-- If the full run learns a poor gait (e.g. shuffling, hopping), tune the
-  reward in `WalkConfig` (e.g. smoothness/energy weights, speed cap).
+- Dashboard verified in headless Edge:
+  - runs list + overlay (walk_10m vs smoke);
+  - 7 curve charts + reward terms;
+  - evaluated all 21 walk_10m checkpoints in 63 s, best marked;
+  - tooltip, keyboard reading and table view work;
+  - Watch loads the checkpoint in the simulator;
+  - no console errors.
+- Tests: 63 passing, `tsc` clean.
+- GPU research done (see Notes); not acted on yet. User asked whether to do
+  GPU-parallel training sooner.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after
   each milestone commit.
 
 ## Notes for later milestones
 
-- M5: the dashboard should show per-checkpoint evaluation (distance, speed,
-  falls, return), because the newest checkpoint isn't always the best (see
-  walk_10m). Maybe cache evaluate() results next to each checkpoint.
-- M5: runs/<name>/run.json has the settings plus progress (`finished`,
-  `steps_done`, `interrupted`, `final_checkpoint`).
-  `policy.list_checkpoints()` exists. TensorBoard event files can be read
-  with `tensorboard.backend.event_processing.event_accumulator` for the
-  dashboard's curves. Switching policies at runtime needs a new command
-  (the server only loads `--policy` at startup today).
-- Future GPU milestone: SB3 + CPU MuJoCo won't use the 3090. MJX / MuJoCo
-  Playground (JAX, thousands of envs on the GPU) is the natural next step
-  for this MJCF-based stack; Isaac Lab would mean converting robots to USD.
+- GPU research (2026-09-24, via a research agent, primary sources):
+  - JAX has **no CUDA on native Windows** (WSL2 is "experimental"), so MJX and
+    MuJoCo Playground need WSL2.
+  - **MuJoCo Warp** (`mujoco-warp` 3.14.0 on PyPI, versioned with MuJoCo)
+    runs on NVIDIA Warp, which has Windows CUDA wheels. The community reports
+    its test suite passing on native Windows. It uses float32.
+  - mjlab (MJWarp + RSL-RL, Isaac-Lab-style API, Go1 velocity task, terrain):
+    Linux-first, Windows "preliminary"; pins mujoco~=3.11; ignores MJCF
+    `<option>` (set it in code).
+  - Isaac Lab/Sim 6.1 needs Windows 11 + an RTX 4080 minimum and uses PhysX,
+    not MuJoCo. Not a fit.
+  - Recommended path: MJWarp + PyTorch (own batched env or mjlab), with
+    ONNX/weights export to run in CPU MuJoCo. Verify sim-to-sim with
+    identical options.
+- M6+: switching robots at runtime (load_policy for another robot) needs the
+  server to rebuild the simulation and resend the scene.

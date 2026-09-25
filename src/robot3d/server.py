@@ -1,8 +1,9 @@
 """FastAPI server: runs one shared simulation in real time and streams it to
-browsers over a WebSocket.
+browsers over a WebSocket, and serves training runs to the dashboard.
 
-    WS   /ws   the protocol in web/src/protocol.ts (mirrored in protocol.py)
-    GET  /     the built frontend (web/dist), once `npm run build` has been run
+    WS   /ws        the protocol in web/src/protocol.ts (mirrored in protocol.py)
+    GET  /api/...   training runs, curves, checkpoints (see protocol.ts, HTTP API)
+    GET  /          the built frontend (web/dist), once `npm run build` has been run
 
 Every connected browser sees the same simulation, like one real robot seen
 from several screens. Any browser's commands (play/pause/reset, motor
@@ -21,12 +22,13 @@ import logging
 import queue
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
@@ -34,16 +36,34 @@ from pydantic import ValidationError
 from robot3d.protocol import (
     ClientMessage,
     ErrorMessage,
+    EvaluateResponse,
+    LoadPolicyCommand,
     PauseCommand,
     PlayCommand,
     ResetCommand,
+    RunDetail,
+    RunSummary,
+    ScalarsResponse,
     SetCtrlCommand,
     StatusMessage,
     UsePolicyCommand,
     client_message_adapter,
 )
+from robot3d.runs import (
+    RUNS_DIR,
+    Checkpoint,
+    ScalarReader,
+    find_checkpoint,
+    list_checkpoints,
+    list_run_dirs,
+    resolve_checkpoint,
+    resolve_run,
+    run_detail,
+    run_summary,
+    save_evaluation,
+)
 from robot3d.scene import SceneEncoder
-from robot3d.simulation import Simulation
+from robot3d.simulation import Controller, Simulation
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +72,73 @@ FPS = 60
 
 # publish(json_text, is_frame): called from the sim thread.
 PublishFn = Callable[[str, bool], None]
+
+
+@dataclass(frozen=True)
+class InstallPolicy:
+    """Internal command (not from the protocol): swap in a loaded policy."""
+
+    controller: Controller
+    label: str
+
+
+def load_policy_controller(checkpoint: Checkpoint, sim: Simulation) -> Controller:
+    """Build a PolicyController for this simulation (slow: loads PyTorch and
+    the network, so call it off the sim thread)."""
+    from robot3d.policy import PolicyController  # PyTorch: import only when needed
+
+    trained_on = checkpoint.run_info()["robot"]
+    if trained_on != sim.robot:
+        raise ValueError(
+            f"{checkpoint.label} was trained on robot {trained_on!r}, but this server simulates {sim.robot!r}"
+        )
+    return PolicyController(checkpoint, sim.model)
+
+
+class EvaluationQueue:
+    """Evaluates checkpoints one at a time on a background thread (a few
+    seconds of CPU each) and caches results next to the checkpoint files."""
+
+    def __init__(self, episodes: int = 5):
+        self.episodes = episodes
+        self._queue: queue.SimpleQueue[Checkpoint | None] = queue.SimpleQueue()
+        self._pending: dict[str, set[str]] = defaultdict(set)  # run name -> checkpoint names
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def submit_missing(self, run_dir: Path) -> int:
+        """Queue every checkpoint of the run that has no evaluation yet."""
+        queued = 0
+        with self._lock:
+            pending = self._pending[run_dir.name]
+            for checkpoint in list_checkpoints(run_dir):
+                if checkpoint.name not in pending and checkpoint.evaluation() is None:
+                    pending.add(checkpoint.name)
+                    self._queue.put(checkpoint)
+                    queued += 1
+            if queued and self._thread is None:
+                self._thread = threading.Thread(target=self._work, name="evaluate", daemon=True)
+                self._thread.start()
+        return queued
+
+    def pending(self, run_name: str) -> int:
+        with self._lock:
+            return len(self._pending[run_name])
+
+    def stop(self) -> None:
+        self._queue.put(None)
+
+    def _work(self) -> None:
+        from robot3d.policy import evaluate  # PyTorch: import only when needed
+
+        while (checkpoint := self._queue.get()) is not None:
+            try:
+                save_evaluation(checkpoint, evaluate(checkpoint, episodes=self.episodes))
+            except Exception:
+                log.exception("evaluating %s failed", checkpoint.label)
+            finally:
+                with self._lock:
+                    self._pending[checkpoint.run_dir.name].discard(checkpoint.name)
 
 
 class SimRunner:
@@ -67,7 +154,7 @@ class SimRunner:
         self.scene_json = self._encoder.scene(sim.data).model_dump_json()
         self.status_json = self._status_json()
         self.latest_frame_json = self._frame_json()
-        self._commands: queue.SimpleQueue[ClientMessage] = queue.SimpleQueue()
+        self._commands: queue.SimpleQueue[ClientMessage | InstallPolicy] = queue.SimpleQueue()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -80,7 +167,7 @@ class SimRunner:
         if self._thread is not None:
             self._thread.join(timeout=2)
 
-    def submit(self, command: ClientMessage) -> None:
+    def submit(self, command: ClientMessage | InstallPolicy) -> None:
         """Queue a command. Called from the event loop; applied on the sim thread."""
         self._commands.put(command)
 
@@ -138,10 +225,14 @@ class SimRunner:
                     case UsePolicyCommand(active=active):
                         self.sim.use_controller(active)
                         state_changed = True
+                    case InstallPolicy(controller=controller, label=label):
+                        self.sim.set_controller(controller)  # drives now; robot restarts standing
+                        self.policy_label = label
+                        state_changed = True
             except (ValueError, RuntimeError) as e:
                 # Checked on the event loop already; this only catches races,
                 # e.g. a slider command queued just after "let the policy drive".
-                log.warning("ignored %s command: %s", command.type, e)
+                log.warning("ignored %s: %s", type(command).__name__, e)
         return state_changed
 
     def _frame_json(self) -> str:
@@ -206,21 +297,23 @@ def _refusal(command: ClientMessage, sim: Simulation) -> str | None:
     return None
 
 
-def create_app(robot: str = "quadruped", keyframe: str = "home", policy: str | Path | None = None) -> FastAPI:
-    """`policy`: a run folder (-> newest checkpoint) or checkpoint .zip to drive the robot."""
+def create_app(
+    robot: str = "quadruped",
+    keyframe: str = "home",
+    policy: str | Path | None = None,
+    runs_dir: Path = RUNS_DIR,
+) -> FastAPI:
+    """`policy`: a run folder (-> newest checkpoint) or checkpoint .zip to drive
+    the robot. `runs_dir`: where the dashboard finds training runs."""
     sim = Simulation(robot, keyframe)
     policy_label = ""
     if policy is not None:
-        # Imported here: loading PyTorch takes a moment and isn't needed otherwise.
-        from robot3d.policy import PolicyController, find_checkpoint
-
         checkpoint = find_checkpoint(policy)
-        trained_on = checkpoint.run_info()["robot"]
-        if trained_on != robot:
-            raise ValueError(f"{checkpoint.label} was trained on robot {trained_on!r}, not {robot!r}")
-        sim.set_controller(PolicyController(checkpoint, sim.model))
+        sim.set_controller(load_policy_controller(checkpoint, sim))
         policy_label = checkpoint.label
     runner = SimRunner(sim, policy_label=policy_label)
+    evaluations = EvaluationQueue()
+    scalars = ScalarReader()
     clients: set[Client] = set()  # only touched on the event loop thread
 
     def broadcast(text: str, is_frame: bool) -> None:
@@ -243,9 +336,60 @@ def create_app(robot: str = "quadruped", keyframe: str = "home", policy: str | P
         runner.start(publish)
         yield
         runner.stop()
+        evaluations.stop()
 
     app = FastAPI(title="robot3d", lifespan=lifespan)
     app.state.runner = runner
+
+    # ------------------------------------------------ HTTP API: training runs
+    # Plain `def` endpoints: FastAPI runs them on worker threads, so reading
+    # event files never blocks the WebSocket traffic on the event loop.
+
+    def _run_dir(run: str) -> Path:
+        try:
+            return resolve_run(run, runs_dir)
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(status_code=404, detail=str(e)) from None
+
+    @app.get("/api/runs")
+    def api_runs() -> list[RunSummary]:
+        return [run_summary(d) for d in list_run_dirs(runs_dir)]
+
+    @app.get("/api/runs/{run}")
+    def api_run(run: str) -> RunDetail:
+        run_dir = _run_dir(run)
+        return run_detail(run_dir, evaluating=evaluations.pending(run_dir.name))
+
+    @app.get("/api/runs/{run}/scalars")
+    def api_scalars(run: str, tags: str) -> ScalarsResponse:
+        """tags: comma-separated TensorBoard tags, e.g. rollout/ep_rew_mean,train/std"""
+        run_dir = _run_dir(run)
+        wanted = [t for t in tags.split(",") if t]
+        return ScalarsResponse(run=run_dir.name, series=scalars.read(run_dir, wanted))
+
+    @app.post("/api/runs/{run}/evaluate")
+    def api_evaluate(run: str) -> EvaluateResponse:
+        return EvaluateResponse(queued=evaluations.submit_missing(_run_dir(run)))
+
+    # ------------------------------------------------------------- WebSocket
+
+    async def load_policy(command: LoadPolicyCommand) -> str | None:
+        """Load a checkpoint off the event loop and hand it to the sim thread.
+        Returns an error message, or None on success."""
+
+        def load() -> InstallPolicy:
+            checkpoint = resolve_checkpoint(resolve_run(command.run, runs_dir), command.checkpoint)
+            return InstallPolicy(load_policy_controller(checkpoint, runner.sim), checkpoint.label)
+
+        try:
+            install = await asyncio.to_thread(load)
+        except (ValueError, FileNotFoundError) as e:
+            return str(e)
+        except Exception as e:
+            log.exception("loading policy failed")
+            return f"could not load the policy: {e}"
+        runner.submit(install)
+        return None
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket) -> None:
@@ -273,10 +417,12 @@ def create_app(robot: str = "quadruped", keyframe: str = "home", policy: str | P
                     client.send_message(ErrorMessage(message=f"invalid message: {detail}").model_dump_json())
                     continue
                 problem = _refusal(command, runner.sim)
+                if problem is None and isinstance(command, LoadPolicyCommand):
+                    problem = await load_policy(command)
+                elif problem is None:
+                    runner.submit(command)
                 if problem is not None:
                     client.send_message(ErrorMessage(message=problem).model_dump_json())
-                    continue
-                runner.submit(command)
         finally:
             clients.discard(client)
             sender.cancel()

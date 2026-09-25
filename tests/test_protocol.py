@@ -17,7 +17,14 @@ from typing import Any
 import pytest
 from pydantic import TypeAdapter
 
-from robot3d.protocol import ClientMessage, ServerMessage
+from robot3d.protocol import (
+    ClientMessage,
+    EvaluateResponse,
+    RunDetail,
+    RunSummary,
+    ScalarsResponse,
+    ServerMessage,
+)
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 GENERATOR_PKG = WEB_DIR / "node_modules" / "ts-json-schema-generator" / "package.json"
@@ -74,7 +81,7 @@ def shape(node: dict, root: dict) -> Any:
         return ("array", shape(items, root), fixed)
     if kind in ("number", "integer"):
         return ("number",)  # TypeScript has a single number type
-    if kind in ("string", "boolean"):
+    if kind in ("string", "boolean", "null"):
         return (kind,)
     raise AssertionError(f"shape() doesn't understand this schema node: {node}")
 
@@ -114,6 +121,20 @@ def test_python_mirror_matches_typescript(ts_schema, name, python_type):
         for field in ts_fields:
             assert py_fields[field] == ts_fields[field], f"'{msg_type}.{field}': types differ"
         assert py_required == ts_required, f"'{msg_type}' message: required fields differ"
+
+
+@pytest.mark.parametrize("model", [RunSummary, RunDetail, ScalarsResponse, EvaluateResponse], ids=lambda m: m.__name__)
+def test_http_api_types_match_typescript(ts_schema, model):
+    """The dashboard's HTTP responses (same names in both languages;
+    RunDetail pulls in its nested types)."""
+    ts = shape(ts_schema["definitions"][model.__name__], ts_schema)
+    py_schema = model.model_json_schema(mode="serialization")
+    py = shape(py_schema, py_schema)
+    ts_fields, py_fields = dict(ts[1]), dict(py[1])
+    assert sorted(py_fields) == sorted(ts_fields), f"{model.__name__}: field names differ"
+    for field in ts_fields:
+        assert py_fields[field] == ts_fields[field], f"{model.__name__}.{field}: types differ"
+    assert py == ts
 
 
 def test_shape_catches_a_mismatch(ts_schema):

@@ -131,11 +131,80 @@ class UsePolicyCommand(_Message):
     active: bool
 
 
+# Run/checkpoint names are plain names, never paths (no "/", "\" or ".."),
+# so a client can't make the server open files outside the runs folder.
+SafeName = Annotated[str, Field(pattern=r"^[\w][\w.-]*$", max_length=200)]
+
+
+class LoadPolicyCommand(_Message):
+    type: Literal["load_policy"] = "load_policy"
+    run: SafeName
+    checkpoint: SafeName
+
+
 ClientMessage = Annotated[
-    PlayCommand | PauseCommand | ResetCommand | SetCtrlCommand | UsePolicyCommand,
+    PlayCommand | PauseCommand | ResetCommand | SetCtrlCommand | UsePolicyCommand | LoadPolicyCommand,
     Field(discriminator="type"),
 ]
 
 # TypeAdapters validate/serialize the union types (plain BaseModels have methods for this).
 server_message_adapter: TypeAdapter[ServerMessage] = TypeAdapter(ServerMessage)
 client_message_adapter: TypeAdapter[ClientMessage] = TypeAdapter(ClientMessage)
+
+# ================================================================ HTTP API (training dashboard)
+
+RunStatus = Literal["running", "finished", "stopped"]
+
+
+class RunSummary(_Message):
+    name: str
+    robot: str
+    status: RunStatus
+    started: str
+    finished: str
+    steps_done: int
+    total_steps: int
+    n_envs: int
+    checkpoints: int
+
+
+class EvaluationInfo(_Message):
+    episodes: int
+    distance: float
+    speed: float
+    falls: int
+    mean_return: float
+
+
+class CheckpointInfo(_Message):
+    name: str
+    steps: int
+    evaluation: EvaluationInfo | None
+
+
+class SettingInfo(_Message):
+    group: str
+    key: str
+    value: str
+
+
+class RunDetail(_Message):
+    summary: RunSummary
+    checkpoints: list[CheckpointInfo]
+    settings: list[SettingInfo]
+    evaluating: int
+
+
+class ScalarSeries(_Message):
+    tag: str
+    steps: list[int]
+    values: list[float]
+
+
+class ScalarsResponse(_Message):
+    run: str
+    series: list[ScalarSeries]
+
+
+class EvaluateResponse(_Message):
+    queued: int

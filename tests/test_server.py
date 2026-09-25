@@ -175,5 +175,49 @@ def test_policy_drives_and_can_be_switched_off(tiny_run):
             assert len(frame.ctrl) == len(scene.actuators)
 
 
+def test_dashboard_api(tiny_run):
+    import time
+
+    with TestClient(create_app("quadruped", runs_dir=tiny_run.parent)) as client:
+        runs = client.get("/api/runs").json()
+        assert [r["name"] for r in runs] == ["tiny"] and runs[0]["status"] == "finished"
+
+        detail = client.get("/api/runs/tiny").json()
+        assert len(detail["checkpoints"]) >= 2 and detail["evaluating"] == 0
+        for checkpoint in detail["checkpoints"]:
+            assert checkpoint["evaluation"] is None or checkpoint["evaluation"]["episodes"] > 0
+
+        scalars = client.get("/api/runs/tiny/scalars", params={"tags": "train/std,rollout/ep_len_mean"}).json()
+        assert [s["tag"] for s in scalars["series"]] == ["train/std", "rollout/ep_len_mean"]
+
+        assert client.get("/api/runs/nope").status_code == 404
+        assert client.get("/api/runs/..%2F..%2Fsecret").status_code == 404
+
+        # Evaluate every checkpoint in the background, then they all have results.
+        client.post("/api/runs/tiny/evaluate")
+        deadline = time.time() + 60
+        while client.get("/api/runs/tiny").json()["evaluating"] > 0 and time.time() < deadline:
+            time.sleep(0.2)
+        detail = client.get("/api/runs/tiny").json()
+        assert all(c["evaluation"] is not None for c in detail["checkpoints"])
+        assert client.post("/api/runs/tiny/evaluate").json() == {"queued": 0}  # nothing left to do
+
+
+def test_load_policy_over_websocket(tiny_run):
+    with TestClient(create_app("quadruped", runs_dir=tiny_run.parent)) as client:
+        with client.websocket_connect("/ws") as ws:
+            assert receive_until(ws, "status").policy == ""
+            first = client.get("/api/runs/tiny").json()["checkpoints"][0]["name"]
+
+            ws.send_json({"type": "load_policy", "run": "tiny", "checkpoint": first})
+            status = receive_until(ws, "status", lambda s: s.policy != "")
+            assert status.policy.startswith("tiny @ ") and status.policy_active is True
+
+            ws.send_json({"type": "load_policy", "run": "tiny", "checkpoint": "step_999999999"})
+            assert "no checkpoint" in receive_until(ws, "error").message
+            ws.send_json({"type": "load_policy", "run": "../tiny", "checkpoint": first})
+            assert receive_until(ws, "error").message.startswith("invalid message")
+
+
 def test_root_page_responds(client):
     assert client.get("/").status_code == 200
