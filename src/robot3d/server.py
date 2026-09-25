@@ -5,7 +5,8 @@ browsers over a WebSocket.
     GET  /     the built frontend (web/dist), once `npm run build` has been run
 
 Every connected browser sees the same simulation, like one real robot seen
-from several screens. Any browser's play/pause/reset affects all of them.
+from several screens. Any browser's commands (play/pause/reset, motor
+targets) affect all of them.
 
 Threads:
   * The simulation runs on its own thread (SimRunner) at a steady 60 fps,
@@ -25,14 +26,22 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import numpy as np
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from robot3d.protocol import ClientMessage, ErrorMessage, StatusMessage, client_message_adapter
-from robot3d.scene import build_frame, build_scene
+from robot3d.protocol import (
+    ClientMessage,
+    ErrorMessage,
+    PauseCommand,
+    PlayCommand,
+    ResetCommand,
+    SetCtrlCommand,
+    StatusMessage,
+    client_message_adapter,
+)
+from robot3d.scene import SceneEncoder
 from robot3d.simulation import Simulation
 
 log = logging.getLogger(__name__)
@@ -50,11 +59,10 @@ class SimRunner:
     def __init__(self, sim: Simulation, fps: int = FPS):
         self.sim = sim
         self.frame_dt = 1.0 / fps
-        scene = build_scene(sim.model, sim.data, sim.robot)
-        self._frame_geoms = np.array(scene.frame_geoms, dtype=int)
+        self._encoder = SceneEncoder(sim.model, sim.robot)
         # Plain str attributes: reading them from another thread is safe, since
         # Python swaps the reference in one step.
-        self.scene_json = scene.model_dump_json()
+        self.scene_json = self._encoder.scene(sim.data).model_dump_json()
         self.status_json = self._status_json()
         self.latest_frame_json = self._frame_json()
         self._commands: queue.SimpleQueue[ClientMessage] = queue.SimpleQueue()
@@ -79,12 +87,15 @@ class SimRunner:
         last_time = self.sim.data.time
         while not self._stop.is_set():
             try:
-                if self._apply_commands():
+                was_paused = self.sim.paused
+                state_changed = self._apply_commands()
+                if self.sim.paused != was_paused:
                     self.status_json = self._status_json()
                     publish(self.status_json, False)
                 self.sim.advance()
-                # Only send a frame if something changed (not while paused).
-                if self.sim.data.time != last_time:
+                # Only send a frame if something changed: time moved on, or a
+                # command changed the state (e.g. new motor targets while paused).
+                if state_changed or self.sim.data.time != last_time:
                     last_time = self.sim.data.time
                     self.latest_frame_json = self._frame_json()
                     publish(self.latest_frame_json, True)
@@ -102,24 +113,29 @@ class SimRunner:
                 next_frame = time.perf_counter()  # fell behind; don't burst to catch up
 
     def _apply_commands(self) -> bool:
-        """Apply queued commands; return True if the paused state changed."""
-        was_paused = self.sim.paused
+        """Apply all queued commands (a slider drag can queue several per
+        frame); return True if the robot's state changed."""
+        state_changed = False
         while True:
             try:
                 command = self._commands.get_nowait()
             except queue.Empty:
                 break
-            match command.type:
-                case "play":
+            match command:
+                case PlayCommand():
                     self.sim.play()
-                case "pause":
+                case PauseCommand():
                     self.sim.pause()
-                case "reset":
+                case ResetCommand():
                     self.sim.reset()
-        return self.sim.paused != was_paused
+                    state_changed = True
+                case SetCtrlCommand(ctrl=targets, duration=duration):
+                    self.sim.set_ctrl(targets, duration)
+                    state_changed = True
+        return state_changed
 
     def _frame_json(self) -> str:
-        return build_frame(self.sim.data, self._frame_geoms).model_dump_json()
+        return self._encoder.frame(self.sim.data).model_dump_json()
 
     def _status_json(self) -> str:
         return StatusMessage(paused=self.sim.paused).model_dump_json()
@@ -212,8 +228,16 @@ def create_app(robot: str = "quadruped", keyframe: str = "home") -> FastAPI:
                     error = e.errors(include_url=False)[0]
                     detail = f"{error['msg']} at {'.'.join(map(str, error['loc'])) or 'top level'}"
                     client.send_message(ErrorMessage(message=f"invalid message: {detail}").model_dump_json())
-                else:
-                    runner.submit(command)
+                    continue
+                # Check motor names here, where we can still answer this client
+                # (the sim thread doesn't know who sent a command).
+                if isinstance(command, SetCtrlCommand):
+                    unknown = sorted(set(command.ctrl) - set(runner.sim.actuator_names))
+                    if unknown:
+                        message = f"unknown actuator(s): {', '.join(unknown)}"
+                        client.send_message(ErrorMessage(message=message).model_dump_json())
+                        continue
+                runner.submit(command)
         finally:
             clients.discard(client)
             sender.cancel()

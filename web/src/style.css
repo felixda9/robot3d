@@ -31,19 +31,236 @@ body {
   height: 100%;
 }
 
-#panel {
+#panel,
+#motors {
   position: fixed;
   top: 12px;
-  left: 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 12px 14px;
-  min-width: 180px;
   background: var(--panel-bg);
   border: 1px solid var(--panel-border);
   border-radius: 10px;
   backdrop-filter: blur(6px);
+}
+
+#panel {
+  left: 12px;
+  min-width: 180px;
+}
+
+/* ------------------------------------------------------------ motor panel */
+
+#motors {
+  right: 12px;
+  width: 330px;
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
+  --thumb: 12px; /* slider thumb diameter; the actual-angle marker uses it too */
+}
+
+#motors:empty {
+  display: none;
+}
+
+.panel-header {
+  font-weight: 600;
+}
+
+.panel-header .hint {
+  margin-left: 6px;
+  font-weight: normal;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.presets button {
+  flex: 1 0 auto;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.presets button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+kbd {
+  display: inline-block;
+  min-width: 1.1em;
+  padding: 0 3px;
+  font: 11px/1.4 ui-monospace, Consolas, monospace;
+  text-align: center;
+  color: var(--text-dim);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+.motor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.motor {
+  display: grid;
+  grid-template-columns: 4.6em 1fr 3.2em 44px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.motor-name {
+  white-space: nowrap;
+}
+
+.motor-slider {
+  position: relative;
+  height: 18px;
+}
+
+.motor-slider input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.motor-slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.motor-slider input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.motor-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: var(--thumb);
+  height: var(--thumb);
+  margin-top: calc(2px - var(--thumb) / 2);
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.motor-slider input[type="range"]::-moz-range-thumb {
+  width: var(--thumb);
+  height: var(--thumb);
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.motor-slider input[type="range"]:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+/* Actual joint angle: a thin line on the track. The thumb's center travels
+   from thumb/2 to (width - thumb/2), so the marker uses the same mapping. */
+.motor-actual {
+  --frac: 0.5;
+  position: absolute;
+  top: 2px;
+  left: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--frac) - 1px);
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: #fff;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+.motor-values {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.motor-values .actual {
+  color: var(--text-dim);
+}
+
+/* Torque: grows from the center line (left = negative, right = positive). */
+.motor-torque {
+  position: relative;
+  height: 8px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.motor-torque::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -1px;
+  bottom: -1px;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.motor-torque .fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 0;
+  border-radius: 2px;
+  background: #58a6ff;
+}
+
+.motor-torque .fill.saturated {
+  background: var(--bad);
+}
+
+.legend {
+  display: flex;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.legend i {
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.legend-thumb {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.legend-marker {
+  width: 2px;
+  height: 11px;
+  background: #fff;
+}
+
+.legend-torque {
+  width: 14px;
+  height: 7px;
+  border-radius: 2px;
+  background: #58a6ff;
 }
 
 .title {

@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from robot3d.robots import load_model, reset_to_keyframe
+from robot3d.simulation import Simulation
 
 LEGS = ["FL", "FR", "RL", "RR"]
 PRIMITIVE_GEOMS = {
@@ -99,3 +100,41 @@ def test_drop_and_settle(model, reset, height_range):
     assert max_speed2.max() < 1e-2, "still moving / jittering"
     assert np.ptp(torso_z2) < 1e-3, "torso height still changing"
     assert np.abs(data.geom_xpos[feet] - feet_start).max() < 2e-3, "feet are sliding"
+
+
+PRESETS = ["home", "crouch", "tall", "sit"]
+PRESET_GLIDE = 0.8  # seconds; same as PRESET_DURATION in web/src/motors.ts
+
+
+@pytest.mark.parametrize(
+    "start, goal", [(a, b) for a in PRESETS for b in PRESETS if a != b], ids=lambda p: p
+)
+def test_pose_preset_transition_is_safe(start, goal):
+    """The UI's pose buttons glide the motor targets to a keyframe's ctrl.
+    Every preset-to-preset move must stay upright the whole way and end at
+    rest, without any motor maxing out. (Jumping the targets instantly
+    instead flips the robot on crouch -> tall.)"""
+    sim = Simulation("quadruped")
+    torso = sim.model.body("torso").id
+
+    def steps(seconds):
+        return range(round(seconds / sim.model.opt.timestep))
+
+    for _ in steps(1.5):  # stand
+        sim.step()
+    for preset, seconds in [(start, 3.0), (goal, 5.0)]:
+        targets = dict(zip(sim.actuator_names, sim.model.key(preset).ctrl))
+        sim.set_ctrl(targets, duration=PRESET_GLIDE)
+        lowest_up, speeds = 1.0, []
+        for _ in steps(seconds):
+            sim.step()
+            lowest_up = min(lowest_up, sim.data.xmat[torso][8])  # [8] = z of torso's up axis
+            speeds.append(np.abs(sim.data.qvel).max())
+
+    assert all(w.number == 0 for w in sim.data.warning), "MuJoCo raised a warning"
+    assert lowest_up > 0.8, "tipped over on the way"  # sit leans back ~32 degrees: cos = 0.85
+    # 5 s: "tall" rocks back and forth for a while after extending (nearly
+    # straight legs damp that sway weakly); it fades smoothly and is still by ~4 s.
+    assert max(speeds[-500:]) < 1e-2, "not at rest"
+    torque_limit = sim.model.actuator_forcerange[:, 1]
+    assert np.all(np.abs(sim.data.actuator_force) < 0.95 * torque_limit), "a motor is at its torque limit"

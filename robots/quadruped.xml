@@ -200,5 +200,19 @@
          qpos="0 0 0.4  1 0 0 0
                0.7 -1.4  0.7 -1.4  0.7 -1.4  0.7 -1.4"
          ctrl="0.7 -1.4  0.7 -1.4  0.7 -1.4  0.7 -1.4"/>
+
+    <!--
+      Pose presets. The web UI lists every keyframe as a pose button (number keys
+      1-9, in this order) and applies only its ctrl, i.e. new motor targets;
+      the robot then moves there itself. No qpos is given, so starting from one
+      of these (the scripts' keyframe option) drops the robot from qpos0.
+      Each keeps foot-under-hip symmetry (knee = -2 x hip) except "sit".
+      Checked in simulation: switching from home to each pose stays upright,
+      with no motor at its torque limit.
+    -->
+    <key name="crouch" ctrl="1.1 -2.2  1.1 -2.2  1.1 -2.2  1.1 -2.2"/>    <!-- torso ~0.16 m -->
+    <key name="tall"   ctrl="0.35 -0.7  0.35 -0.7  0.35 -0.7  0.35 -0.7"/> <!-- torso ~0.32 m -->
+    <!-- Front legs nearly straight, rear legs folded: sits on its rear thighs, nose up ~32 deg. -->
+    <key name="sit"    ctrl="0.25 -0.5  0.25 -0.5  1.5 -2.5  1.5 -2.5"/>
   </keyframe>
 </mujoco>

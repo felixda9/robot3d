@@ -54,6 +54,9 @@ def shape(node: dict, root: dict) -> Any:
             return ("union", tuple(sorted((shape(n, root) for n in node[key]), key=repr)))
     kind = node.get("type")
     if kind == "object":
+        values = node.get("additionalProperties")
+        if isinstance(values, dict) and not node.get("properties"):
+            return ("map", shape(values, root))  # Record<string, T> / dict[str, T]
         fields = tuple(sorted((name, shape(n, root)) for name, n in node.get("properties", {}).items()))
         return ("object", fields, tuple(sorted(node.get("required", []))))
     if kind == "array":

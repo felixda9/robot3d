@@ -16,11 +16,17 @@
  * Flow:
  *   connect -> server sends SceneMessage, StatusMessage, latest FrameMessage
  *           -> then a FrameMessage ~60 times per second while the sim runs
- *   client  -> sends ClientMessage commands (play / pause / reset)
+ *              (and whenever motor targets change)
+ *   client  -> sends ClientMessage commands (play / pause / reset / set_ctrl)
+ *
+ * Per-motor arrays (FrameMessage.ctrl etc., KeyframeInfo.ctrl) are in
+ * actuator order, the order of SceneMessage.actuators.
  */
 
 export type Vec3 = [number, number, number];
 export type Rgba = [number, number, number, number];
+/** [min, max] */
+export type Range = [number, number];
 /** Row-major 3x3 rotation matrix: [r00, r01, r02, r10, r11, r12, r20, r21, r22]. */
 export type Mat3 = [number, number, number, number, number, number, number, number, number];
 
@@ -72,6 +78,28 @@ export interface CameraInfo {
   fovy: number;
 }
 
+/**
+ * One motor. All our motors are MuJoCo position actuators: ctrl is the TARGET
+ * joint angle (radians), and a built-in PD controller produces the torque.
+ */
+export interface ActuatorInfo {
+  /** Actuator name (for our robots, the same as its joint's name). */
+  name: string;
+  /** Name of the joint it drives. */
+  joint: string;
+  /** Allowed targets in radians; the server clamps set_ctrl values to this. */
+  ctrl_range: Range;
+  /** Torque limits in N·m (the motor's strength); [0, 0] = unlimited. */
+  force_range: Range;
+}
+
+/** A named pose from the robot's MJCF <keyframe> list, used as a pose preset. */
+export interface KeyframeInfo {
+  name: string;
+  /** Motor targets in actuator order (same order as SceneMessage.actuators). */
+  ctrl: number[];
+}
+
 // ---------------------------------------------------------------- server -> client
 
 /** Sent once per connection: everything that does not change while the sim runs. */
@@ -85,9 +113,16 @@ export interface SceneMessage {
   /** Ids of the dynamic geoms, in the order their poses appear in FrameMessage. */
   frame_geoms: number[];
   camera: CameraInfo;
+  /** The motors, in actuator order (the order of every per-motor array). */
+  actuators: ActuatorInfo[];
+  /** Pose presets; the first is the pose the robot starts from and resets to. */
+  keyframes: KeyframeInfo[];
 }
 
-/** The poses of all dynamic geoms at one instant (MuJoCo's geom_xpos / geom_xmat). */
+/**
+ * Everything that changes, at one instant. Sent ~60 times per second while
+ * the sim runs, and also when the motor targets change (even while paused).
+ */
 export interface FrameMessage {
   type: "frame";
   /** Simulation time in seconds. */
@@ -96,6 +131,12 @@ export interface FrameMessage {
   xpos: number[];
   /** Flat row-major 3x3 matrix per geom: length 9 * frame_geoms.length. */
   xmat: number[];
+  /** Per motor: target angle in radians (MuJoCo's data.ctrl). */
+  ctrl: number[];
+  /** Per motor: actual angle of its joint in radians. Differs from ctrl while moving or under load. */
+  joint_pos: number[];
+  /** Per motor: torque it is applying right now, N·m (MuJoCo's data.actuator_force). */
+  torque: number[];
 }
 
 /** Simulation run state. Sent on connect and whenever it changes. */
@@ -129,4 +170,22 @@ export interface ResetCommand {
   type: "reset";
 }
 
-export type ClientMessage = PlayCommand | PauseCommand | ResetCommand;
+/**
+ * Set motor targets. Only the named motors change, so two browsers can move
+ * different sliders at once. Values in radians; unknown names are an error;
+ * out-of-range values are clamped to ctrl_range.
+ */
+export interface SetCtrlCommand {
+  type: "set_ctrl";
+  /** Actuator name -> target angle in radians, e.g. { "FL_knee": -1.2 }. */
+  ctrl: Record<string, number>;
+  /**
+   * Seconds (sim time) to get there, 0..10. 0 = set the targets at once
+   * (sliders). > 0 = the named motors' targets glide from where they are to
+   * the new values together, all arriving at the same moment (pose presets).
+   * Jumping at once between very different poses can throw the robot over.
+   */
+  duration: number;
+}
+
+export type ClientMessage = PlayCommand | PauseCommand | ResetCommand | SetCtrlCommand;

@@ -95,7 +95,8 @@ web/                    Vite + TypeScript + three.js frontend
   src/connection.ts     WebSocket with auto-reconnect
   src/viewer.ts         three.js scene: camera, lights, ground, sky, geoms
   src/geoms.ts          MuJoCo geom -> three.js mesh, pose helpers
-  src/main.ts           wiring + UI (buttons, stats)
+  src/motors.ts         motor panel: sliders, pose presets, torque bars
+  src/main.ts           wiring + UI (buttons, stats, keyboard shortcuts)
   vite.config.ts        dev server + /ws proxy
 ```
 
@@ -109,7 +110,7 @@ web/                    Vite + TypeScript + three.js frontend
 - [x] **2. Web viewer:** FastAPI WebSocket server runs the simulation in real
   time; a three.js page renders it with an orbit camera, shadows, a ground grid,
   and play/pause/reset buttons. *Success = the web view matches MuJoCo's viewer.*
-- [ ] **3. Manual control:** one slider per motor in the web UI plus a few
+- [x] **3. Manual control:** one slider per motor in the web UI plus a few
   keyboard shortcuts. Commands go to the backend and move the robot.
 - [ ] **4. First training:** Gymnasium env for the quadruped (reward forward
   velocity and staying upright; penalize energy use and falling). PPO training
@@ -181,15 +182,16 @@ web/                    Vite + TypeScript + three.js frontend
   welded to the world) are streamed; static scenery is sent once in the
   scene. Switch to binary Float32Array only if big scenes need it.
 - **2026-09-24: One shared simulation per server**, like one real robot seen
-  from several screens; any tab's play/pause/reset affects all of them.
+  from several screens; any tab's commands (play/pause/reset, motor targets)
+  affect all of them.
 - **2026-09-24: Server threading:** the sim runs on its own thread at a steady
   60 fps (time.sleep is ~1 ms precise on Python 3.11+ Windows); asyncio
   handles the network. Frames are serialized once and broadcast with
   `loop.call_soon_threadsafe`; commands go through a `queue.SimpleQueue`.
   Per client, only the newest frame is kept (slow clients skip frames);
   scene/status/error messages are queued and never dropped. Frames are sent
-  only when sim time changed (none while paused). New clients get scene,
-  status, then the latest frame.
+  when sim time changed or a command changed the state (e.g. new targets
+  while paused). New clients get scene, status, then the latest frame.
 - **2026-09-24: three.js runs z-up** (`Object3D.DEFAULT_UP = (0,0,1)` before
   creating the camera), so MuJoCo poses go in unchanged. Capsules and cylinders
   are rotated from three's y axis to MuJoCo's z axis. Colors are sRGB. Geom
@@ -201,25 +203,62 @@ web/                    Vite + TypeScript + three.js frontend
   other devices, e.g. a phone/tablet later). The Vite proxy targets
   127.0.0.1:8000 (env `ROBOT3D_BACKEND` overrides), because Node may resolve
   `localhost` to IPv6.
+- **2026-09-24: Manual control protocol (M3):**
+  - The scene lists `actuators` (name, joint, ctrl_range, force_range) and
+    `keyframes` (name, ctrl).
+  - Every frame carries per-motor `ctrl` (current target), `joint_pos`
+    (actual angle) and `torque`, all in actuator order.
+  - `set_ctrl` is partial and addressed by actuator name
+    (`{ctrl: {FL_knee: -1.2}, duration}`), so two tabs can move different
+    motors at once.
+  - The server clamps values to ctrl_range and rejects NaN/Inf (Pydantic
+    `FiniteFloat`) and unknown names (checked on the event loop so the error
+    goes back to the sender).
+  - Radians on the wire; the UI shows degrees.
+- **2026-09-24: Pose presets = the robot's MJCF keyframes** (robots are data).
+  The UI shows one button per keyframe; number keys 1–9 pick them in file
+  order. Only a keyframe's ctrl is applied. The quadruped has home, crouch,
+  tall, and sit.
+- **2026-09-24: Presets glide; sliders jump.** `set_ctrl.duration` > 0 moves
+  the named motors' targets from current to new *together* (synchronized
+  joint-space interpolation with smoothstep, in sim time, so pausing freezes
+  a glide). Presets use 0.8 s; sliders use 0, so the user sets the speed.
+  - Why: jumping targets flipped the robot on crouch → tall.
+  - A per-joint *rate limit* made it worse (sit → tall flipped even at
+    1.5 rad/s): joints with little distance to travel arrive early, and the
+    lopsided in-between poses tip the robot backward.
+  - Synchronized glides of ≥ 0.5 s were safe for all 12 transitions, and
+    tests/test_quadruped.py checks them all at 0.8 s.
+  - `Simulation.step()` = apply glides + mj_step.
+- **2026-09-24: Keyboard shortcuts:** Space = play/pause, R = reset, 1–9 = pose
+  presets (ignored with Ctrl/Alt/Meta so browser shortcuts still work).
+  Buttons blur after a click so Space doesn't press them again.
+- **2026-09-24: Motor panel UI:**
+  - Slider thumb = target, white marker = actual angle, centered bar =
+    torque (turns red at ≥ 95% of the limit).
+  - While you drag, or for 300 ms after, frames don't overwrite that slider,
+    so it doesn't jump back while your command is in flight.
+  - The preset whose targets match the current ones is highlighted.
 
 ## Current status
 
-**Milestone 2 done and confirmed by the user (2026-09-24). Next: Milestone 3
-(manual control).**
-- Verified in headless Edge (DevTools protocol), both via Vite (5173) and the
-  production build served by the backend (8000):
-  - streams at 60 fps; pause/reset/play buttons work (reset while paused
-    shows the robot hanging at 0.40 m); play runs sim time at real time.
-  - page reload works; auto-reconnect after a backend restart works.
-  - no console errors in the production build.
-- Parity: the web screenshot and MuJoCo's own offscreen render (same default
-  camera, settled robot) match in framing, position, and every leg angle.
-  Only the styling differs (MuJoCo: reflective checker floor, overhead light).
-- Tests: 15 passing (`uv run pytest`), `tsc` clean.
-- Deferred on purpose: keyboard shortcuts (M3), camera "follow robot" toggle
-  (useful once it walks, M4).
-- Git remote: `origin` = https://github.com/felixda9/robot3d.git, `main` pushed
-  (M1 + M2). Push after each milestone commit.
+**Milestone 3 done (2026-09-24), waiting for the user to test.**
+- Verified in headless Edge with real key and mouse events:
+  - a real mouse drag on a slider moves the joint;
+  - keys 1–4 glide between poses (the sliders animate);
+  - Space and R work;
+  - sit → tall and crouch → tall stay upright;
+  - no console errors.
+- Physics, for the user to know: dragging one hip to its limit instantly
+  (e.g. FL hip to −57°) lifts that foot far forward. The robot then stands on
+  3 legs with its center of mass outside them, and falls over. That's real
+  balance, not a bug; press R.
+- The "tall" pose sways fore-and-aft for ~3 s after arriving (nearly
+  straight legs damp the rocking weakly); it settles by itself.
+- Tests: 33 passing (`uv run pytest`), `tsc` clean.
+- Deferred: camera "follow robot" toggle (useful once it walks, M4).
+- Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after
+  each milestone commit.
 
 ## Notes for later milestones
 
@@ -229,3 +268,6 @@ web/                    Vite + TypeScript + three.js frontend
   scripts need an `if __name__ == "__main__":` guard.
 - M4: To use CUDA, PyTorch has to come from the CUDA wheel index (configure it
   in `pyproject.toml` under `[tool.uv.sources]`).
+- M4: The policy should output target *offsets* around the `home` keyframe's
+  ctrl (read from the model), clipped to ctrl_range. Policy playback in the
+  web viewer must disable or override the manual sliders (decide how then).

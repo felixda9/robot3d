@@ -8,10 +8,11 @@ Field names are snake_case on the wire, identical in both languages.
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, TypeAdapter
 
 Vec3 = tuple[float, float, float]
 Rgba = tuple[float, float, float, float]
+Range = tuple[float, float]  # [min, max]
 Mat3 = tuple[float, float, float, float, float, float, float, float, float]  # row-major 3x3
 
 GeomType = Literal["plane", "sphere", "capsule", "ellipsoid", "cylinder", "box"]
@@ -47,6 +48,18 @@ class CameraInfo(_Message):
     fovy: float
 
 
+class ActuatorInfo(_Message):
+    name: str
+    joint: str
+    ctrl_range: Range
+    force_range: Range
+
+
+class KeyframeInfo(_Message):
+    name: str
+    ctrl: list[float]
+
+
 # ---------------------------------------------------------------- server -> client
 
 
@@ -57,6 +70,8 @@ class SceneMessage(_Message):
     geoms: list[GeomInfo]
     frame_geoms: list[int]
     camera: CameraInfo
+    actuators: list[ActuatorInfo]
+    keyframes: list[KeyframeInfo]
 
 
 class FrameMessage(_Message):
@@ -64,6 +79,9 @@ class FrameMessage(_Message):
     time: float
     xpos: list[float]
     xmat: list[float]
+    ctrl: list[float]
+    joint_pos: list[float]
+    torque: list[float]
 
 
 class StatusMessage(_Message):
@@ -98,8 +116,16 @@ class ResetCommand(_Message):
     type: Literal["reset"] = "reset"
 
 
+class SetCtrlCommand(_Message):
+    type: Literal["set_ctrl"] = "set_ctrl"
+    # FiniteFloat: reject NaN/Infinity (Python's JSON parser accepts them, and
+    # one NaN motor target would turn the whole simulation into NaNs).
+    ctrl: dict[str, FiniteFloat]
+    duration: Annotated[FiniteFloat, Field(ge=0.0, le=10.0)]
+
+
 ClientMessage = Annotated[
-    PlayCommand | PauseCommand | ResetCommand,
+    PlayCommand | PauseCommand | ResetCommand | SetCtrlCommand,
     Field(discriminator="type"),
 ]
 
