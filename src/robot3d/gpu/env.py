@@ -103,6 +103,7 @@ class GpuWalkEnv:
         self.episode_length = torch.zeros(num_envs, dtype=torch.long, device=self.device)
         self.episode_return = torch.zeros(num_envs, device=self.device)
         self.start_x = torch.zeros(num_envs, device=self.device)
+        self.next_push = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # episode step of the next shove
         # Foot x/y and on-ground at the end of the last step (for slip, and
         # as "was down" for landings), and each foot's time in the air.
         self._feet_before: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -161,6 +162,7 @@ class GpuWalkEnv:
             self.episode_length = torch.randint(
                 0, self.task.max_steps, (self.num_envs,), generator=self.generator, device=self.device
             )
+            self.next_push = self.episode_length + self._push_delays(self.num_envs)
         self._feet_before = self.task.feet_state(self.geom_xpos)
         return self.observe()
 
@@ -172,6 +174,14 @@ class GpuWalkEnv:
         task = self.task
         actions = actions.clamp(-1.0, 1.0)
         self.ctrl.copy_(task.action_to_ctrl(actions))
+        c = task.config
+        if c.push_interval > 0:
+            # Shoves (see WalkConfig.push_interval), without a GPU->CPU sync:
+            # every robot draws a kick, only those due get it.
+            due = self.episode_length >= self.next_push
+            kick = (2 * torch.rand((self.num_envs, 2), generator=self.generator, device=self.device) - 1)
+            self.qvel[:, 0:2] += kick * c.push_max_speed * due[:, None]
+            self.next_push = torch.where(due, self.episode_length + self._push_delays(self.num_envs), self.next_push)
         x_before = self.qpos[:, 0].clone()
         y_before = self.qpos[:, 1].clone()
         self.power.zero_()
@@ -242,3 +252,10 @@ class GpuWalkEnv:
         self.episode_length[mask] = 0
         self.episode_return[mask] = 0.0
         self.start_x[mask] = self.qpos[mask, 0]
+        self.next_push[mask] = self._push_delays(self.num_envs)[mask]
+
+    def _push_delays(self, n: int) -> torch.Tensor:
+        """(n,) control steps until the next push, like WalkTask.push_delay."""
+        c, dt = self.task.config, self.task.control_dt
+        uniform = torch.rand(n, generator=self.generator, device=self.device)
+        return (c.push_interval * (0.5 + uniform) / dt).round().long().clamp(min=1)

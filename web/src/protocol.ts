@@ -207,8 +207,9 @@ export interface UsePolicyCommand {
 /**
  * Load a checkpoint from the runs folder and let it drive (replaces any
  * loaded policy; the robot restarts standing). Names, not paths, e.g.
- * { run: "walk_10m", checkpoint: "step_009000012" }. The run must be for the
- * robot the server simulates.
+ * { run: "walk_10m", checkpoint: "step_009000012" }. If the run was trained
+ * on another robot, the server switches to that robot and sends every
+ * browser a new SceneMessage.
  */
 export interface LoadPolicyCommand {
   type: "load_policy";

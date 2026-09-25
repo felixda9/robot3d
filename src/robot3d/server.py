@@ -7,7 +7,8 @@ browsers over a WebSocket, and serves training runs to the dashboard.
 
 Every connected browser sees the same simulation, like one real robot seen
 from several screens. Any browser's commands (play/pause/reset, motor
-targets) affect all of them.
+targets) affect all of them. Loading a policy trained on another robot
+switches the simulation to that robot, and every browser gets the new scene.
 
 Threads:
   * The simulation runs on its own thread (SimRunner) at a steady 60 fps,
@@ -79,23 +80,23 @@ PublishFn = Callable[[str, bool], None]
 
 @dataclass(frozen=True)
 class InstallPolicy:
-    """Internal command (not from the protocol): swap in a loaded policy."""
+    """Internal command (not from the protocol): swap in a loaded policy,
+    and with `sim`, a new simulation first (the policy is for another robot)."""
 
     controller: Controller
     label: str
+    sim: Simulation | None = None
 
 
-def load_policy_controller(checkpoint: Checkpoint, sim: Simulation) -> Controller:
-    """Build a PolicyController for this simulation (slow: loads PyTorch and
+def load_policy(checkpoint: Checkpoint, sim: Simulation) -> InstallPolicy:
+    """Load a checkpoint to drive the simulation, or, if it was trained on
+    another robot, a new simulation of that robot (slow: loads PyTorch and
     the network, so call it off the sim thread)."""
     from robot3d.policy import PolicyController  # PyTorch: import only when needed
 
     trained_on = checkpoint.run_info()["robot"]
-    if trained_on != sim.robot:
-        raise ValueError(
-            f"{checkpoint.label} was trained on robot {trained_on!r}, but this server simulates {sim.robot!r}"
-        )
-    return PolicyController(checkpoint, sim.model)
+    new_sim = None if trained_on == sim.robot else Simulation(trained_on)
+    return InstallPolicy(PolicyController(checkpoint, (new_sim or sim).model), checkpoint.label, new_sim)
 
 
 class EvaluationQueue:
@@ -168,8 +169,10 @@ class SimRunner:
         self._commands: queue.SimpleQueue[ClientMessage | InstallPolicy] = queue.SimpleQueue()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._publish: PublishFn | None = None
 
     def start(self, publish: PublishFn) -> None:
+        self._publish = publish
         self._thread = threading.Thread(target=self._run, args=(publish,), name="sim", daemon=True)
         self._thread.start()
 
@@ -242,7 +245,9 @@ class SimRunner:
                         self.sim.release()
                     case PushCommand(geom=geom, point=point, direction=direction, force=force):
                         self.sim.push(geom, point, direction, force)
-                    case InstallPolicy(controller=controller, label=label):
+                    case InstallPolicy(controller=controller, label=label, sim=new_sim):
+                        if new_sim is not None:
+                            self._switch_robot(new_sim)
                         self.sim.set_controller(controller)  # drives now; robot restarts standing
                         self.policy_label = label
                         state_changed = True
@@ -251,6 +256,15 @@ class SimRunner:
                 # e.g. a slider command queued just after "let the policy drive".
                 log.warning("ignored %s: %s", type(command).__name__, e)
         return state_changed
+
+    def _switch_robot(self, sim: Simulation) -> None:
+        """Simulate another robot from now on; every browser gets its scene."""
+        sim.paused = self.sim.paused
+        self.sim = sim
+        self._encoder = SceneEncoder(sim.model, sim.robot)
+        self.scene_json = self._encoder.scene(sim.data).model_dump_json()
+        if self._publish is not None:
+            self._publish(self.scene_json, False)
 
     def _frame_json(self) -> str:
         return self._encoder.frame(self.sim.data).model_dump_json()
@@ -333,9 +347,10 @@ def create_app(
     sim = Simulation(robot, keyframe)
     policy_label = ""
     if policy is not None:
-        checkpoint = find_checkpoint(policy)
-        sim.set_controller(load_policy_controller(checkpoint, sim))
-        policy_label = checkpoint.label
+        install = load_policy(find_checkpoint(policy), sim)
+        sim = install.sim or sim
+        sim.set_controller(install.controller)
+        policy_label = install.label
     runner = SimRunner(sim, policy_label=policy_label)
     evaluations = EvaluationQueue()
     scalars = ScalarReader()
@@ -402,13 +417,13 @@ def create_app(
 
     # ------------------------------------------------------------- WebSocket
 
-    async def load_policy(command: LoadPolicyCommand) -> str | None:
+    async def load_policy_command(command: LoadPolicyCommand) -> str | None:
         """Load a checkpoint off the event loop and hand it to the sim thread.
         Returns an error message, or None on success."""
 
         def load() -> InstallPolicy:
             checkpoint = resolve_checkpoint(resolve_run(command.run, runs_dir), command.checkpoint)
-            return InstallPolicy(load_policy_controller(checkpoint, runner.sim), checkpoint.label)
+            return load_policy(checkpoint, runner.sim)
 
         try:
             install = await asyncio.to_thread(load)
@@ -448,7 +463,7 @@ def create_app(
                     continue
                 problem = _refusal(command, runner.sim)
                 if problem is None and isinstance(command, LoadPolicyCommand):
-                    problem = await load_policy(command)
+                    problem = await load_policy_command(command)
                 elif problem is None:
                     runner.submit(command)
                     if isinstance(command, (GrabCommand, ReleaseCommand)):

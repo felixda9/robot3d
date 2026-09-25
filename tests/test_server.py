@@ -272,5 +272,33 @@ def test_grab_and_push_over_websocket(client):
     assert sim._grab is None
 
 
+@pytest.fixture(scope="module")
+def tiny_run12(tmp_path_factory):
+    """A tiny real training run of the 12-motor robot."""
+    from robot3d.training import PPOConfig, train
+
+    return train(
+        robot="quadruped12", total_steps=128, n_envs=2, name="tiny12", checkpoint_every=64,
+        ppo=PPOConfig(n_steps=64, minibatches=2, n_epochs=1), runs_dir=tmp_path_factory.mktemp("runs12"), verbose=0,
+    )
+
+
+def test_watching_another_robots_policy_switches_the_robot(tiny_run12):
+    with TestClient(create_app("quadruped", runs_dir=tiny_run12.parent)) as client:
+        with client.websocket_connect("/ws") as ws:
+            assert receive_until(ws, "scene").robot == "quadruped"
+            checkpoint = client.get("/api/runs/tiny12").json()["checkpoints"][0]["name"]
+            ws.send_json({"type": "load_policy", "run": "tiny12", "checkpoint": checkpoint})
+            scene = receive_until(ws, "scene")
+            assert scene.robot == "quadruped12" and len(scene.actuators) == 12
+            status = receive_until(ws, "status", lambda s: s.policy != "")
+            assert status.policy.startswith("tiny12 @ ") and status.policy_active
+            frame = receive_until(ws, "frame")
+            assert len(frame.ctrl) == 12
+        # A browser connecting now gets the new robot straight away.
+        with client.websocket_connect("/ws") as ws:
+            assert receive_until(ws, "scene").robot == "quadruped12"
+
+
 def test_root_page_responds(client):
     assert client.get("/").status_code == 200

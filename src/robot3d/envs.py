@@ -48,6 +48,7 @@ class WalkEnv(gym.Env):
         self._last_action = np.zeros(self.task.num_actions)
         self._steps = 0
         self._start_x = float(self.data.qpos[0])
+        self._next_push = self._push_delay()
         self._feet_down = self.task.feet_state(self.data)[1]
         self._air_time = np.zeros(len(self.task.feet))
         return self.task.observation(self.data, self._last_action, self.task.gait_phase(0)), {}
@@ -56,6 +57,13 @@ class WalkEnv(gym.Env):
         task, model, data = self.task, self.model, self.data
         action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         data.ctrl[:] = task.action_to_ctrl(action)
+
+        c = task.config
+        if c.push_interval > 0 and self._steps >= self._next_push:
+            # A shove: the torso's horizontal velocity (free joint qvel[0:2],
+            # world frame) jumps, as if bumped into (see WalkConfig.push_interval).
+            data.qvel[0:2] += self.np_random.uniform(-c.push_max_speed, c.push_max_speed, 2)
+            self._next_push = self._steps + self._push_delay()
 
         x_before, y_before = data.qpos[0], data.qpos[1]
         feet_before = task.feet_state(data)
@@ -97,6 +105,9 @@ class WalkEnv(gym.Env):
             **{f"reward_{name}": value for name, value in terms.items()},
         }
         return observation, reward, terminated, truncated, info
+
+    def _push_delay(self) -> int:
+        return self.task.push_delay(self.np_random.uniform()) if self.task.config.push_interval > 0 else 0
 
 
 gym.register(id="robot3d/Walk-v0", entry_point="robot3d.envs:WalkEnv")

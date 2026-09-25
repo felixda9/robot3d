@@ -68,6 +68,14 @@ class WalkConfig:
     reset_joint_noise: float = 0.1  # rad
     reset_velocity_noise: float = 0.1  # rad/s and m/s
 
+    # --- random shoves (since 5c, for robustness): every push_interval seconds
+    # (randomly 0.5x to 1.5x that), the torso gets a sudden velocity kick,
+    # forward/back and sideways each uniform in +-push_max_speed, like being
+    # bumped into. The policy isn't told; it feels the stumble and must catch
+    # itself. (legged_gym does the same, every 15 s.) 0 = no pushes.
+    push_interval: float = 4.0  # s
+    push_max_speed: float = 1.0  # m/s
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -85,6 +93,7 @@ class WalkConfig:
             "gait_frequency": 0.0,
             "gait_weight": 0.0,
             "clearance_weight": 0.0,
+            "push_interval": 0.0,
         }
         unknown = sorted(set(saved) - {f.name for f in fields(cls)})
         if unknown:
@@ -185,6 +194,12 @@ class WalkTask:
             # on a circle, and the policy should see them as close.
             parts.append([np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)])
         return np.concatenate(parts).astype(np.float32)
+
+    # ------------------------------------------------------------------ pushes
+
+    def push_delay(self, uniform: float) -> int:
+        """Control steps until the next push, from a uniform(0, 1) random number."""
+        return max(1, round(self.config.push_interval * (0.5 + uniform) / self.control_dt))
 
     # -------------------------------------------------------------- gait clock
 

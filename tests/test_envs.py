@@ -12,7 +12,9 @@ from robot3d.envs import WalkEnv
 
 @pytest.fixture
 def env():
-    return WalkEnv("quadruped")
+    from robot3d.walk import WalkConfig
+
+    return WalkEnv("quadruped", WalkConfig(push_interval=0.0))  # no random shoves: tests check exact behavior
 
 
 def test_passes_gymnasium_checker():
@@ -153,6 +155,25 @@ def test_gait_clock_in_observations(env):
     assert obs[-2:].tolist() == pytest.approx([np.sin(angle), np.cos(angle)], abs=1e-6)
 
 
+def test_random_shoves(env):
+    from robot3d.walk import WalkConfig
+
+    def speed_jumps(env, seconds):
+        """Steps where the torso's horizontal velocity changed by > 0.3 m/s at once."""
+        env.reset(seed=1)
+        jumps, last = 0, env.data.qvel[:2].copy()
+        for _ in range(round(seconds / env.task.control_dt)):
+            env.step(np.zeros(env.task.num_actions))
+            jumps += np.linalg.norm(env.data.qvel[:2] - last) > 0.3
+            last = env.data.qvel[:2].copy()
+        return jumps
+
+    assert speed_jumps(env, 6.0) == 0  # pushes off
+    pushed = WalkEnv("quadruped", WalkConfig(push_interval=1.0, push_max_speed=1.0))
+    assert 3 <= speed_jumps(pushed, 6.0) <= 12  # every 0.5-1.5 s (a few kicks can be too small to count)
+    assert WalkConfig().push_interval > 0  # new runs train with them
+
+
 def test_air_time_bookkeeping(env):
     task = env.task
     down, air = np.ones(4, bool), np.zeros(4)
@@ -172,13 +193,14 @@ def test_first_task_runs_keep_their_reward():
 
     # run.json of the first task (walk_10m etc.) saved forward_weight=1.0 and no walk terms
     newer = ("tracking_weight", "support_weight", "trot_weight", "air_time_weight",
-             "gait_frequency", "gait_weight", "clearance_weight")
+             "gait_frequency", "gait_weight", "clearance_weight", "push_interval")
     saved = {k: v for k, v in WalkConfig().to_dict().items() if k not in newer}
     saved["forward_weight"] = 1.0
     old = WalkConfig.from_run(saved)
     assert (old.forward_weight, old.tracking_weight, old.support_weight, old.trot_weight, old.air_time_weight) == (
         1.0, 0.0, 0.0, 0.0, 0.0)
     assert (old.gait_frequency, old.gait_weight, old.clearance_weight) == (0.0, 0.0, 0.0)
+    assert old.push_interval == 0.0  # no shoves either
 
 
 def test_runs_before_the_clock_keep_their_observation(env):

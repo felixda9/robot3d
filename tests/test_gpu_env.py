@@ -17,7 +17,10 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a C
 def gpu_env():
     from robot3d.gpu.env import GpuWalkEnv
 
-    env = GpuWalkEnv(num_envs=64, device="cuda:0", seed=0)
+    from robot3d.walk import WalkConfig
+
+    # No random shoves: the physics comparison needs identical inputs.
+    env = GpuWalkEnv(num_envs=64, config=WalkConfig(push_interval=0.0), device="cuda:0", seed=0)
     env.reset()
     return env
 
@@ -44,7 +47,9 @@ def put_cpu_state_into_world(gpu_env, world, cpu_env):
 def test_gpu_physics_matches_cpu(gpu_env):
     from robot3d.envs import WalkEnv
 
-    cpu = WalkEnv()
+    from robot3d.walk import WalkConfig
+
+    cpu = WalkEnv(config=WalkConfig(push_interval=0.0))
     cpu_obs, _ = cpu.reset(seed=3)
     gpu_env.reset()
     put_cpu_state_into_world(gpu_env, 0, cpu)
@@ -74,6 +79,23 @@ def test_fallen_robots_restart_standing(gpu_env):
     assert gpu_env.episode_length[5] == 0  # restarted
     assert gpu_env.qpos[5, 2].item() == pytest.approx(gpu_env.task.standing_height, abs=0.02)
     assert result.obs[5, 0].item() == pytest.approx(gpu_env.task.standing_height, abs=0.02)  # its new observation
+
+
+def test_random_shoves_on_the_gpu():
+    from robot3d.gpu.env import GpuWalkEnv
+    from robot3d.walk import WalkConfig
+
+    env = GpuWalkEnv(num_envs=256, config=WalkConfig(push_interval=1.0), device="cuda:0", seed=1)
+    env.reset(randomize_episode_start=False)
+    still = torch.zeros((env.num_envs, env.num_actions), device=env.device)
+    jumps = torch.zeros(env.num_envs, device=env.device)
+    last = env.qvel[:, :2].clone()
+    for _ in range(round(3.0 / env.task.control_dt)):  # 3 s: 2-6 shoves each
+        env.step(still)
+        jumps += ((env.qvel[:, :2] - last).norm(dim=1) > 0.3).float()
+        last = env.qvel[:, :2].clone()
+    assert 1.5 < jumps.mean().item() < 6.5
+    assert (env.next_push >= env.episode_length).all()  # every robot has its next shove scheduled (or due next step)
 
 
 def test_tiny_rsl_training_run_plays_in_cpu_mujoco(tmp_path):

@@ -1,4 +1,4 @@
-"""Headless physics sanity checks for the quadruped.
+"""Headless physics sanity checks for the quadrupeds (8 and 12 motors).
 
 Milestone 1 success criterion, as code: dropped onto the floor, the robot
 lands on its feet and settles without jittering or exploding.
@@ -12,6 +12,8 @@ from robot3d.robots import load_model, reset_to_keyframe
 from robot3d.simulation import Simulation
 
 LEGS = ["FL", "FR", "RL", "RR"]
+# Robot -> its joints per leg (each driven by a motor of the same name).
+ROBOTS = {"quadruped": ("hip", "knee"), "quadruped12": ("roll", "hip", "knee")}
 PRIMITIVE_GEOMS = {
     mujoco.mjtGeom.mjGEOM_PLANE,
     mujoco.mjtGeom.mjGEOM_SPHERE,
@@ -20,18 +22,25 @@ PRIMITIVE_GEOMS = {
 }
 
 
+@pytest.fixture(scope="module", params=list(ROBOTS))
+def robot(request):
+    return request.param
+
+
 @pytest.fixture(scope="module")
-def model():
-    return load_model("quadruped")
+def model(robot):
+    return load_model(robot)
 
 
-def test_structure(model):
-    # 1 free joint (torso) + 8 hinges: 7 qpos for the torso (xyz + quaternion) + 8 angles.
-    assert model.njnt == 9
-    assert model.nq == 15
-    assert model.nu == 8
+def test_structure(robot, model):
+    parts = ROBOTS[robot]
+    n = 4 * len(parts)
+    # 1 free joint (torso) + one hinge per motor: 7 qpos for the torso (xyz + quaternion) + the angles.
+    assert model.njnt == 1 + n
+    assert model.nq == 7 + n
+    assert model.nu == n
     for leg in LEGS:
-        for part in ("hip", "knee"):
+        for part in parts:
             name = f"{leg}_{part}"
             jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
             act = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
@@ -106,15 +115,21 @@ PRESETS = ["home", "crouch", "tall", "sit"]
 PRESET_GLIDE = 0.8  # seconds; same as PRESET_DURATION in web/src/motors.ts
 
 
+PRESETS12 = [*PRESETS, "wide"]
+
+
 @pytest.mark.parametrize(
-    "start, goal", [(a, b) for a in PRESETS for b in PRESETS if a != b], ids=lambda p: p
+    "robot, start, goal",
+    [("quadruped", a, b) for a in PRESETS for b in PRESETS if a != b]
+    + [("quadruped12", a, b) for a in PRESETS12 for b in PRESETS12 if a != b],
+    ids=lambda p: p,
 )
-def test_pose_preset_transition_is_safe(start, goal):
+def test_pose_preset_transition_is_safe(robot, start, goal):
     """The UI's pose buttons glide the motor targets to a keyframe's ctrl.
     Every preset-to-preset move must stay upright the whole way and end at
     rest, without any motor maxing out. (Jumping the targets instantly
     instead flips the robot on crouch -> tall.)"""
-    sim = Simulation("quadruped")
+    sim = Simulation(robot)
     torso = sim.model.body("torso").id
 
     def steps(seconds):

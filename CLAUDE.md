@@ -95,7 +95,8 @@ MuJoCo is the physics engine; everything around it is built here.
 ## Layout
 
 ```
-robots/                 MJCF robot files (data, not code)
+robots/                 MJCF robot files (data, not code): quadruped.xml (8 motors),
+                        quadruped12.xml (12 motors: + a sideways "roll" joint per hip)
 src/robot3d/
   robots.py             load_model(), reset_to_keyframe()
   simulation.py         Simulation: model + state + real-time pacing (shared loop)
@@ -158,7 +159,7 @@ web/                    Vite + TypeScript + three.js frontend
   stand upright and not fall in any circumstance, even get back up if it
   fell", tested by grabbing and pushing the robot with the mouse):
   1. [x] Mouse grab + push in the viewer, push force adjustable.
-  2. [ ] A 12-motor robot (a sideways hip joint per leg, like real robot
+  2. [ ] (built, training) A 12-motor robot (a sideways hip joint per leg, like real robot
      dogs; user's choice, since the 8-motor legs can't roll it back over
      from its side), trained to walk while being shoved at random.
   3. [ ] A get-up policy plus an automatic switch between it and the walker
@@ -575,6 +576,34 @@ web/                    Vite + TypeScript + three.js frontend
   - Checked with real mouse events in headless Edge: lifting the torso,
     release, a 150 N push (knocked the standing robot over, away from the
     camera), and a drag on empty space (camera rotates, robot untouched).
+- **2026-09-25: 12-motor robot `quadruped12`** (5c step 2, user's choice):
+  - quadruped.xml plus a roll joint per hip (`<leg>_roll`, hinge about x,
+    ±0.8 rad like Spot/ANYmal's ~0.75; positive = foot swings to the
+    robot's left). A short hip link (0.15 kg capsule) carries the thigh from
+    the roll axis (y = ±0.08, the torso's edge) out to y = ±0.11, where
+    quadruped.xml has its hips, so both stand alike (torso 0.26 m).
+    7.2 kg total. Motors ordered leg by leg: roll, hip, knee.
+  - **Legs collide with the torso** (torso contype 1/conaffinity 2, leg
+    parts contype 3/conaffinity 0; legs still pass through each other).
+    quadruped.xml's legs pass through its body; a get-up policy must not
+    learn to cheat that way.
+  - Presets: home, crouch, tall, sit as before, plus "wide" (roll 0.3
+    outward). tests/test_quadruped.py runs every check for both robots
+    (drop and settle, all 20 preset transitions).
+  - The walk task needed no changes (48 observations, 12 actions); 4096
+    GPU robots flailing at random: no contact-buffer overflow.
+- **2026-09-25: Random shoves in training** (5c step 2): WalkConfig
+  `push_interval` 4 s (each gap random in 2–6 s) and `push_max_speed`
+  1 m/s: the torso's horizontal velocity jumps by up to ±1 m/s in x and y
+  (legged_gym's method; it pushes every 15 s). On by default for new runs,
+  also during evaluation (it's part of the task); off for older runs
+  (from_run). CPU env: np_random; GPU env: per-robot schedule, applied
+  without a GPU→CPU sync. Tests that compare exact physics turn it off.
+- **2026-09-25: Watching another robot's policy switches the robot**:
+  load_policy for a run trained on another robot builds a new Simulation
+  of that robot (off the sim thread), the sim thread swaps it in and
+  broadcasts the new SceneMessage; the viewer and motor panel rebuild.
+  (Was: an error "trained on robot X, but this server simulates Y".)
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -591,8 +620,11 @@ web/                    Vite + TypeScript + three.js frontend
   strides) and `trot_clock` (gait clock: 2 steps/s, higher lifts). The
   user prefers the clock (more consistent), and of the clock walkers the
   1.5 Hz one (`trot_clock_15`, ~27 cm strides): now the default gait.
-- Milestone 5c (robustness) started: step 1, mouse grab + push, is done;
-  waiting for the user to try it before step 2 (12-motor robot).
+- Milestone 5c (robustness): step 1 (mouse grab + push) done. Step 2: the
+  12-motor robot, random shoves in training and robot switching are built
+  and tested; `walk12_push` (quadruped12, 1.5 Hz trot-walk, shoves) is
+  training. Then: measure how hard a push it survives, vs trot_clock_15
+  (never shoved in training).
 - `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
   - 0 KL spikes (walk_10m: 114, max 50.5);
   - steady 1.0–1.28 m/s after 3M steps;
@@ -607,7 +639,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 89 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 115 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after
