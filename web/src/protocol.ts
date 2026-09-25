@@ -18,7 +18,7 @@
  *           -> then a FrameMessage ~60 times per second while the sim runs
  *              (and whenever motor targets change)
  *   client  -> sends ClientMessage commands (play / pause / reset / set_ctrl /
- *              use_policy / load_policy)
+ *              use_policy / load_policy / grab / release / push)
  *
  * The HTTP API for the training dashboard is at the end of this file.
  *
@@ -216,13 +216,55 @@ export interface LoadPolicyCommand {
   checkpoint: string;
 }
 
+/**
+ * Grab a robot part with the mouse and pull it; sent again whenever the
+ * mouse moves, until ReleaseCommand. A spring pulls the grabbed point toward
+ * `target`, sized to the robot's mass (strong enough to lift it by the
+ * torso, capped at 3 g). It acts in the physics, so it works while a policy
+ * drives too. One grab at a time per server; a new one replaces the old.
+ */
+export interface GrabCommand {
+  type: "grab";
+  /** The clicked geom (id as in SceneMessage.geoms); must be part of the robot. */
+  geom: number;
+  /** The grabbed spot in the geom's own frame, so it stays on the part as it moves. */
+  point: Vec3;
+  /** Where to pull it: the mouse position in the world, m. */
+  target: Vec3;
+}
+
+/** Let go of the grabbed part (also happens when the grabbing browser disconnects). */
+export interface ReleaseCommand {
+  type: "release";
+}
+
+/**
+ * Shove a robot part: `force` newtons at `point`, along `direction`, for
+ * 0.1 s of sim time. The velocity change is force x 0.1 s / mass: 60 N on
+ * the 6.6 kg quadruped is a ~0.9 m/s shove. Waits while paused.
+ */
+export interface PushCommand {
+  type: "push";
+  /** The clicked geom; must be part of the robot. */
+  geom: number;
+  /** Where it's hit, in the geom's own frame. */
+  point: Vec3;
+  /** World direction (any length; the server normalizes it; not zero). */
+  direction: Vec3;
+  /** Newtons, 0..1000. */
+  force: number;
+}
+
 export type ClientMessage =
   | PlayCommand
   | PauseCommand
   | ResetCommand
   | SetCtrlCommand
   | UsePolicyCommand
-  | LoadPolicyCommand;
+  | LoadPolicyCommand
+  | GrabCommand
+  | ReleaseCommand
+  | PushCommand;
 
 // ================================================================ HTTP API
 // The training dashboard reads runs over plain HTTP (JSON), not the

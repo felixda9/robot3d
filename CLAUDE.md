@@ -84,7 +84,7 @@ MuJoCo is the physics engine; everything around it is built here.
     `--steps`, `--envs`, `--name`, `--seed`); Ctrl+C stops and still saves a checkpoint
   - `uv run scripts/train_gpu.py`: training on the GPU (MuJoCo Warp, 4096 robots;
     `--trainer ppo|rsl`, `--steps`, `--envs`, `--name`, `--seed`,
-    `--checkpoint-every`, `--epochs`, `--minibatches`)
+    `--checkpoint-every`, `--epochs`, `--minibatches`, `--gait-hz`)
   - `uv run tensorboard --logdir runs`: training curves on http://localhost:6006
   - `uv run scripts/evaluate.py runs/<name> [--all]`: headless distance/speed/falls
     (also caches results for the dashboard)
@@ -123,6 +123,7 @@ web/                    Vite + TypeScript + three.js frontend
   src/viewer.ts         three.js scene: camera, lights, ground, sky, geoms
   src/geoms.ts          MuJoCo geom -> three.js mesh, pose helpers
   src/motors.ts         motor panel: sliders, pose presets, torque bars
+  src/interaction.ts    mouse grab (drag a part) and push (double-click) on the robot
   src/api.ts            typed fetch client for the HTTP API
   src/dashboard/        training dashboard (dashboard.ts, linechart.ts SVG charts, css)
   src/main.ts           wiring + UI (views/tabs, buttons, stats, shortcuts, toast)
@@ -153,6 +154,15 @@ web/                    Vite + TypeScript + three.js frontend
   in CPU MuJoCo. **Pipeline done and verified. Since separate gradient
   clipping, our GPU PPO is stable** (trot_ppo: 18/18 checkpoints good);
   now used for the trot-walk (see Decisions, 2026-09-25).
+- [ ] **5c. Robustness** (added 2026-09-25 at the user's request: "always
+  stand upright and not fall in any circumstance, even get back up if it
+  fell", tested by grabbing and pushing the robot with the mouse):
+  1. [x] Mouse grab + push in the viewer, push force adjustable.
+  2. [ ] A 12-motor robot (a sideways hip joint per leg, like real robot
+     dogs; user's choice, since the 8-motor legs can't roll it back over
+     from its side), trained to walk while being shoved at random.
+  3. [ ] A get-up policy plus an automatic switch between it and the walker
+     (user's choice: two policies, like ANYmal's recovery controller).
 - [ ] **6. Robot designer:** simple YAML/JSON robot spec (body parts, joints,
   motors) → generated MJCF; then a visual editor in the browser.
 - [ ] **7. Environments & commands:** terrain, stairs, obstacles. Train a policy
@@ -529,7 +539,36 @@ web/                    Vite + TypeScript + three.js frontend
     (2.0 vs 1.3 per second, ~20 vs ~30 cm per cycle), higher lifts, and
     twice the motor power (~25 vs ~12 W). A lower gait_frequency (e.g.
     1.5 Hz: ~27 cm) would give longer strides with the clock.
-  - The user watches both and picks the default (currently: clock on).
+  - The user watched both: the clock walk "looks a lot faster and more
+    consistent" (same 0.4 m/s; it looks faster from the higher cadence).
+    **The gait clock is the default gait.** User chose to try it slower:
+    `trot_clock_15` = 1.5 Hz (`train_gpu.py --gait-hz 1.5`, ~27 cm
+    strides) for comparison with 2 Hz; the winner sets the default
+    gait_frequency.
+- **2026-09-25: Mouse grab and push (5c step 1):**
+  - Protocol: `grab {geom, point, target}` (resent as the mouse moves),
+    `release`, `push {geom, point, direction, force}`. Points are in the
+    geom's own frame (three.js mesh frame = MuJoCo geom frame), so a grabbed
+    spot stays on its part. The server refuses static-world geoms and zero
+    directions, and releases a grab when its browser disconnects.
+  - Physics in `Simulation` via `data.xfrc_applied` (set before every
+    mj_step, cleared when nothing acts): the policy feels it like any
+    external force and is never told.
+    - Grab = critically damped spring, stiffness scaled by the whole
+      robot's mass (2 Hz; sags ~6 cm when lifting the robot), force capped
+      at 3 g × mass. Grabbing off-center tilts the robot, as it should.
+    - Push = force held for 0.1 s of sim time (60 N on 6.6 kg ≈ 0.9 m/s),
+      horizontal, away from the camera through the clicked spot (along the
+      view when looking straight down). Waits while paused.
+  - UI: left-drag on a robot part grabs it (after 4 px, so clicks and
+    double-clicks don't), anywhere else rotates the camera (a capture-phase
+    listener disables OrbitControls before it sees the press); double-click
+    pushes; "Push force" slider 10–300 N (default 60, remembered per
+    browser). An orange line + dot shows the grab, an arrow flashes on a
+    push.
+  - Checked with real mouse events in headless Edge: lifting the torso,
+    release, a 150 N push (knocked the standing robot over, away from the
+    camera), and a drag on empty space (camera rotates, robot untouched).
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -543,9 +582,11 @@ web/                    Vite + TypeScript + three.js frontend
   (see Decisions, 2026-09-25).
 - Two walkers, both trained on the GPU in ~16 min with our PPO, both
   0.4 m/s trot-walks without falls: `trot_ppo` (no clock: longer, calmer
-  strides) and `trot_clock` (gait clock: 2 steps/s, higher lifts).
-  **Waiting for the user to watch both and pick the default gait** (and
-  possibly the clock's frequency).
+  strides) and `trot_clock` (gait clock: 2 steps/s, higher lifts). The
+  user prefers the clock (more consistent). `trot_clock_15` (1.5 Hz) is
+  training; next: the user compares it with the 2 Hz walker.
+- Milestone 5c (robustness) started: step 1, mouse grab + push, is done;
+  waiting for the user to try it before step 2 (12-motor robot).
 - `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
   - 0 KL spikes (walk_10m: 114, max 50.5);
   - steady 1.0–1.28 m/s after 3M steps;
@@ -560,7 +601,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 84 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 89 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after

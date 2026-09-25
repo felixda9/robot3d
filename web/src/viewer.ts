@@ -18,6 +18,24 @@ const FLOOR = new THREE.Color().setRGB(0.13, 0.2, 0.28, THREE.SRGBColorSpace);
 const SUN_OFFSET = new THREE.Vector3(1.5, -1.0, 4.0);
 /** Shadows are computed in a box this many meters around the robot. */
 const SHADOW_EXTENT = 2.5;
+/** Grab line and push arrow color (the UI accent). */
+const INTERACTION_COLOR = 0xe8913a;
+
+/** A robot part under the mouse (see Viewer.pick). */
+export interface Pick {
+  /** MuJoCo geom id. */
+  geom: number;
+  mesh: THREE.Mesh;
+  /** Where the mouse ray hit it, world coordinates. */
+  point: THREE.Vector3;
+}
+
+/** A part being pulled: the grabbed spot (mesh-local) and where it's pulled to (world). */
+export interface GrabView {
+  mesh: THREE.Mesh;
+  local: THREE.Vector3;
+  target: THREE.Vector3;
+}
 
 /**
  * The 3D view: draws a MuJoCo scene and moves its geoms to each frame's poses.
@@ -36,6 +54,13 @@ export class Viewer {
   private readonly geomRoot = new THREE.Group();
   /** Meshes in FrameMessage order (null = geom not drawn, e.g. a hidden group). */
   private frameMeshes: (THREE.Mesh | null)[] = [];
+  /** The moving meshes (robot parts): what the mouse can grab and push. */
+  private pickable: THREE.Mesh[] = [];
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly pointer = new THREE.Vector2();
+  private grab: GrabView | null = null;
+  private readonly grabLine: THREE.Line;
+  private readonly grabDot: THREE.Mesh;
   /** Center of the moving geoms; the sun, shadows and grid follow it. */
   private readonly focus = new THREE.Vector3();
   /** Follow camera: where `focus` was when the camera last moved with it. */
@@ -86,6 +111,28 @@ export class Viewer {
     this.ground.visible = false;
     this.scene.add(this.ground);
 
+    // Grab visuals: a line from the grabbed spot to the mouse, and a dot at
+    // the mouse end. Drawn on top of everything (no depth test).
+    const interactionMaterial = (m: THREE.Material) => {
+      m.depthTest = false;
+      m.transparent = true;
+      return m;
+    };
+    this.grabLine = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      interactionMaterial(new THREE.LineBasicMaterial({ color: INTERACTION_COLOR })),
+    );
+    this.grabDot = new THREE.Mesh(
+      new THREE.SphereGeometry(0.012, 16, 8),
+      interactionMaterial(new THREE.MeshBasicMaterial({ color: INTERACTION_COLOR })),
+    );
+    for (const object of [this.grabLine, this.grabDot]) {
+      object.renderOrder = 10;
+      object.visible = false;
+      object.frustumCulled = false;
+      this.scene.add(object);
+    }
+
     new ResizeObserver(() => this.resize(container)).observe(container);
     this.resize(container);
     this.renderer.setAnimationLoop(() => this.render());
@@ -106,10 +153,13 @@ export class Viewer {
         this.ground.position.z = geom.pos[2];
         continue;
       }
+      mesh.userData.geomId = geom.id;
       meshes.set(geom.id, mesh);
       this.geomRoot.add(mesh);
     }
     this.frameMeshes = scene.frame_geoms.map((id) => meshes.get(id) ?? null);
+    this.pickable = this.frameMeshes.filter((m): m is THREE.Mesh => m !== null);
+    this.showGrab(null);
 
     // Start from MuJoCo's default viewpoint, but keep the user's camera when
     // merely reconnecting to the same robot.
@@ -146,6 +196,67 @@ export class Viewer {
   setFollow(on: boolean): void {
     this.following = on;
     this.followAnchor.copy(this.focus); // start from here, no jump
+  }
+
+  // --------------------------------------------------- mouse interaction
+
+  get canvas(): HTMLCanvasElement {
+    return this.renderer.domElement;
+  }
+
+  /** The ray from the camera through a screen position (client pixels). */
+  ray(clientX: number, clientY: number): THREE.Ray {
+    const rect = this.canvas.getBoundingClientRect();
+    this.pointer.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    return this.raycaster.ray.clone();
+  }
+
+  /** The robot part under a screen position, or null (floor, sky). */
+  pick(clientX: number, clientY: number): Pick | null {
+    this.ray(clientX, clientY);
+    const hit = this.raycaster.intersectObjects(this.pickable, false)[0];
+    if (hit === undefined) return null;
+    const mesh = hit.object as THREE.Mesh;
+    return { geom: mesh.userData.geomId as number, mesh, point: hit.point.clone() };
+  }
+
+  cameraDirection(): THREE.Vector3 {
+    return this.camera.getWorldDirection(new THREE.Vector3());
+  }
+
+  /** Turn camera rotate/pan/zoom off while the mouse is busy with the robot. */
+  setOrbitEnabled(on: boolean): void {
+    this.controls.enabled = on;
+  }
+
+  /** Draw (or hide, with null) the line of a part being pulled. */
+  showGrab(grab: GrabView | null): void {
+    this.grab = grab;
+    this.grabLine.visible = this.grabDot.visible = grab !== null;
+  }
+
+  /** A short-lived arrow where a part was pushed. */
+  flashPush(point: THREE.Vector3, direction: THREE.Vector3): void {
+    const length = 0.25;
+    const arrow = new THREE.ArrowHelper(
+      direction.clone().normalize(),
+      point.clone().addScaledVector(direction, -length), // ends at the spot that was hit
+      length,
+      INTERACTION_COLOR,
+      0.07,
+      0.04,
+    );
+    arrow.traverse((child) => {
+      const material = (child as THREE.Mesh).material as THREE.Material | undefined;
+      if (material) material.depthTest = false;
+      child.renderOrder = 10;
+    });
+    this.scene.add(arrow);
+    window.setTimeout(() => {
+      this.scene.remove(arrow);
+      arrow.dispose();
+    }, 600);
   }
 
   /** Place the camera like MuJoCo's free camera (azimuth/elevation/distance). */
@@ -185,6 +296,14 @@ export class Viewer {
     this.ground.position.x = Math.round(this.focus.x);
     this.ground.position.y = Math.round(this.focus.y);
     this.sky.position.copy(this.camera.position); // the sky is "infinitely" far away
+    if (this.grab !== null) {
+      // The grabbed spot moves with its part; recompute it every frame.
+      const { mesh, local, target } = this.grab;
+      mesh.updateMatrixWorld();
+      const anchor = mesh.localToWorld(local.clone());
+      this.grabLine.geometry.setFromPoints([anchor, target]);
+      this.grabDot.position.copy(target);
+    }
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -204,6 +323,7 @@ export class Viewer {
       this.geomRoot.remove(mesh);
     }
     this.frameMeshes = [];
+    this.pickable = [];
   }
 }
 

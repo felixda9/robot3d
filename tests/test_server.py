@@ -246,5 +246,31 @@ def test_run_from_newer_code_explains_itself(tiny_run, tmp_path):
             assert "some_new_setting" in message and "restart" in message
 
 
+def test_grab_and_push_over_websocket(client):
+    runner = client.app.state.runner
+    sim = runner.sim
+    torso = next(g for g in range(sim.model.ngeom) if sim.model.geom_bodyid[g] == 1)
+    floor = next(g for g in range(sim.model.ngeom) if sim.model.geom_bodyid[g] == 0)
+    with client.websocket_connect("/ws") as ws:
+        receive_until(ws, "frame")
+        ws.send_json({"type": "grab", "geom": floor, "point": [0, 0, 0], "target": [0, 0, 1]})
+        assert "static world" in receive_until(ws, "error").message
+        ws.send_json({"type": "push", "geom": torso, "point": [0, 0, 0], "direction": [1, 0, 0], "force": -5})
+        assert receive_until(ws, "error").message.startswith("invalid message")
+        ws.send_json({"type": "push", "geom": torso, "point": [0, 0, 0], "direction": [0, 0, 0], "force": 50})
+        assert "zero" in receive_until(ws, "error").message
+
+        ws.send_json({"type": "grab", "geom": torso, "point": [0, 0, 0], "target": [0, 0, 1.0]})
+        deadline = time.time() + 5
+        while sim._grab is None and time.time() < deadline:
+            time.sleep(0.02)
+        assert sim._grab is not None
+    # The browser disconnected mid-drag: the server lets go.
+    deadline = time.time() + 5
+    while sim._grab is not None and time.time() < deadline:
+        time.sleep(0.02)
+    assert sim._grab is None
+
+
 def test_root_page_responds(client):
     assert client.get("/").status_code == 200

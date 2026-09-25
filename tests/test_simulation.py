@@ -102,3 +102,60 @@ def test_reset_keeps_paused_state(sim):
     sim.reset()
     assert sim.paused and sim.data.time == 0.0
     assert sim.data.qpos[2] == pytest.approx(0.4)  # torso back at the drop height
+
+
+# ------------------------------------------------------ grab and push (mouse)
+
+
+def steps(sim: Simulation, seconds: float) -> None:
+    for _ in range(round(seconds / sim.model.opt.timestep)):
+        sim.step()
+
+
+def torso_geom(sim: Simulation) -> int:
+    return next(g for g in range(sim.model.ngeom) if sim.model.geom_bodyid[g] == 1)
+
+
+def test_grab_lifts_the_robot_and_release_drops_it(sim):
+    steps(sim, 1.0)  # settle standing
+    geom = torso_geom(sim)
+    start = sim.data.qpos[:3].copy()
+    sim.grab(geom, point=[0, 0, 0], target=sim.data.geom_xpos[geom] + [0, 0, 0.3])
+    steps(sim, 1.5)
+    lifted = sim.data.qpos[2] - start[2]
+    assert lifted > 0.2  # pulled up ~0.3 m (a spring sags a little under the weight)
+    assert np.linalg.norm(sim.data.qpos[:2] - start[:2]) < 0.05  # straight up, not sideways
+
+    sim.release()
+    steps(sim, 1.0)
+    assert not sim.data.xfrc_applied.any()
+    assert sim.data.qpos[2] < start[2] + 0.05  # back on the floor
+
+
+def test_push_shoves_briefly(sim):
+    steps(sim, 1.0)
+    geom = torso_geom(sim)
+    sim.push(geom, point=[0, 0, 0], direction=[0, 2, 0], force=60.0)  # direction length doesn't matter
+    steps(sim, Simulation.PUSH_SECONDS)
+    # Impulse 60 N x 0.1 s = 6 N s; the robot resists with its feet on the
+    # floor, so it moves sideways, but slower than 6 / mass.
+    vy = sim.data.qvel[1]
+    assert 0.2 < vy < 6.0 / sim.robot_mass + 0.05
+    steps(sim, 0.01)
+    assert not sim.data.xfrc_applied.any()  # the push is over
+
+
+def test_grab_and_push_only_move_the_robot(sim):
+    floor = next(g for g in range(sim.model.ngeom) if sim.model.geom_bodyid[g] == 0)
+    with pytest.raises(ValueError, match="static world"):
+        sim.grab(floor, [0, 0, 0], [0, 0, 1])
+    with pytest.raises(ValueError, match="zero"):
+        sim.push(torso_geom(sim), [0, 0, 0], [0, 0, 0], 50.0)
+
+
+def test_reset_lets_go(sim):
+    sim.grab(torso_geom(sim), [0, 0, 0], [0, 0, 2])
+    steps(sim, 0.1)
+    sim.reset()
+    steps(sim, 0.1)
+    assert not sim.data.xfrc_applied.any()

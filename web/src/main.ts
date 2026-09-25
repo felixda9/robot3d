@@ -1,6 +1,7 @@
 import "./style.css";
 import { Connection, defaultSocketUrl } from "./connection";
 import { Dashboard } from "./dashboard/dashboard";
+import { RobotMouse } from "./interaction";
 import { MotorPanel } from "./motors";
 import type { ServerMessage, StatusMessage } from "./protocol";
 import { Viewer } from "./viewer";
@@ -18,6 +19,8 @@ const ui = {
   playPause: element<HTMLButtonElement>("play-pause"),
   reset: element<HTMLButtonElement>("reset"),
   follow: element<HTMLInputElement>("follow"),
+  pushForce: element<HTMLInputElement>("push-force"),
+  pushForceValue: element<HTMLSpanElement>("push-force-value"),
   policyBox: element<HTMLDivElement>("policy-box"),
   policyName: element<HTMLDivElement>("policy-name"),
   policyToggle: element<HTMLButtonElement>("policy-toggle"),
@@ -35,6 +38,7 @@ const motors = new MotorPanel(ui.motors, (ctrl, duration) =>
   connection.send({ type: "set_ctrl", ctrl, duration }),
 );
 let status: StatusMessage = { type: "status", paused: false, policy: "", policy_active: false };
+new RobotMouse(viewer, (message) => connection.send(message), () => Number(ui.pushForce.value));
 let presetCount = 0;
 let framesThisSecond = 0;
 viewer.setFollow(ui.follow.checked);
@@ -128,6 +132,28 @@ ui.follow.addEventListener("change", () => {
   ui.follow.blur();
 });
 
+// Push force: remembered in this browser (localStorage can be unavailable, e.g. private windows).
+const PUSH_FORCE_KEY = "robot3d.pushForce";
+try {
+  const saved = localStorage.getItem(PUSH_FORCE_KEY);
+  if (saved !== null) ui.pushForce.value = saved;
+} catch {
+  // keep the default
+}
+function showPushForce(): void {
+  ui.pushForceValue.textContent = `${ui.pushForce.value} N`;
+}
+ui.pushForce.addEventListener("input", showPushForce);
+ui.pushForce.addEventListener("change", () => {
+  try {
+    localStorage.setItem(PUSH_FORCE_KEY, ui.pushForce.value);
+  } catch {
+    // not remembered; fine
+  }
+  ui.pushForce.blur(); // arrow keys / Space shouldn't keep acting on it
+});
+showPushForce();
+
 // ------------------------------------------------------------ views + toast
 
 const dashboard = new Dashboard(ui.dashboard, {
@@ -189,7 +215,8 @@ function updateHelp(): void {
   if (!status.policy_active && presetCount > 0) {
     parts.push(`<kbd>${presetCount > 1 ? `1–${Math.min(presetCount, 9)}` : "1"}</kbd> poses`);
   }
-  parts.push("Mouse: left rotate, right pan, wheel zoom");
+  parts.push("Drag the robot: pull it · Double-click it: push");
+  parts.push("Mouse elsewhere: left rotate, right pan, wheel zoom");
   ui.help.innerHTML = parts.join(" · ");
 }
 

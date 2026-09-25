@@ -4,8 +4,10 @@ Shared by the MuJoCo viewer script and the web server so both pace time the
 same way.
 """
 
+import math
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Protocol
 
 import mujoco
@@ -26,11 +28,27 @@ class Controller(Protocol):
     def act(self, data: mujoco.MjData) -> None: ...  # sets data.ctrl
 
 
+@dataclass
+class _Push:
+    geom: int
+    point: np.ndarray  # in the geom's frame
+    force: np.ndarray  # world frame, N
+    until: float  # sim time
+
+
 class Simulation:
     """One robot's model + state, stepped so sim time keeps pace with the wall clock.
 
     Not thread-safe: use it from one thread (the web server gives it its own).
     """
+
+    # Mouse grab: a spring from the grabbed point to the mouse, with its
+    # stiffness scaled by the robot's total mass so the same pull feels the
+    # same for any robot. As a mass-spring, it would oscillate at
+    # GRAB_FREQUENCY; the damping is "critical", so it settles without bouncing.
+    GRAB_FREQUENCY = 2.0  # Hz
+    GRAB_MAX_ACCEL = 3 * 9.81  # force cap = this x robot mass (3 g: can lift it, can't fling it)
+    PUSH_SECONDS = 0.1  # a push is a force held this long: a quick shove
 
     def __init__(self, robot: str = "quadruped", keyframe: str = "home", max_steps_per_advance: int = 50):
         self.robot = robot
@@ -54,6 +72,13 @@ class Simulation:
         self.controller: Controller | None = None
         self.controller_active = False
         self._physics_steps = 0  # since reset; decides when the controller acts
+        # External forces from the web viewer (grab / push), see grab() and push().
+        self._grab: tuple[int, np.ndarray, np.ndarray] | None = None  # geom, point in geom frame, target
+        self._pushes: list[_Push] = []
+        self._forces_on = False
+        root = self.model.body_rootid[1] if self.model.nbody > 1 else 0
+        self.robot_mass = float(self.model.body_subtreemass[root])
+        self._jacp = np.zeros((3, self.model.nv))
         self.reset()
 
     def set_controller(self, controller: Controller | None, active: bool = True) -> None:
@@ -107,11 +132,89 @@ class Simulation:
             # torque each motor would now apply) so the UI can show them.
             mujoco.mj_forward(self.model, self.data)
 
+    # ------------------------------------------------------ external forces
+
+    def grab(self, geom: int, point, target) -> None:
+        """Pull a robot part toward `target` (world, m) until release().
+
+        `point` is the grabbed spot in the geom's own frame, so it stays on
+        the part as the part moves. Forces act through MuJoCo's
+        data.xfrc_applied (an extra force + torque on a body), so the robot
+        and its policy feel them like any other push; the policy is never
+        told about them.
+        """
+        self._check_movable(geom)
+        self._grab = (geom, np.asarray(point, dtype=float), np.asarray(target, dtype=float))
+
+    def release(self) -> None:
+        self._grab = None
+
+    def push(self, geom: int, point, direction, force: float) -> None:
+        """Shove a part: `force` newtons at `point` (geom frame) along
+        `direction` (world) for PUSH_SECONDS of sim time. The change in
+        velocity it causes = force x time / mass (60 N for 0.1 s on the
+        6.6 kg quadruped: ~0.9 m/s)."""
+        self._check_movable(geom)
+        direction = np.asarray(direction, dtype=float)
+        norm = np.linalg.norm(direction)
+        if norm == 0:
+            raise ValueError("push direction is zero")
+        self._pushes.append(
+            _Push(geom, np.asarray(point, dtype=float), force * direction / norm, self.data.time + self.PUSH_SECONDS)
+        )
+
+    def _check_movable(self, geom: int) -> None:
+        if not 0 <= geom < self.model.ngeom:
+            raise ValueError(f"no geom {geom}")
+        if self.model.body_rootid[self.model.geom_bodyid[geom]] == 0:
+            raise ValueError(f"geom {geom} is part of the static world, not the robot")
+
+    def _apply_external_forces(self) -> None:
+        """Set data.xfrc_applied from the grab and pushes (before each mj_step)."""
+        self._pushes = [p for p in self._pushes if self.data.time < p.until]
+        if self._grab is None and not self._pushes:
+            if self._forces_on:
+                self.data.xfrc_applied[:] = 0.0
+                self._forces_on = False
+            return
+        self.data.xfrc_applied[:] = 0.0
+        self._forces_on = True
+        if self._grab is not None:
+            geom, local, target = self._grab
+            body = self.model.geom_bodyid[geom]
+            point = self._world_point(geom, local)
+            mujoco.mj_jac(self.model, self.data, self._jacp, None, point, body)
+            velocity = self._jacp @ self.data.qvel  # of the grabbed point, m/s
+            omega = 2 * math.pi * self.GRAB_FREQUENCY
+            # Critically damped spring: acceleration = w^2 * stretch - 2 w * velocity.
+            force = self.robot_mass * (omega**2 * (target - point) - 2 * omega * velocity)
+            limit = self.robot_mass * self.GRAB_MAX_ACCEL
+            size = np.linalg.norm(force)
+            if size > limit:
+                force *= limit / size
+            self._add_force(body, point, force)
+        for push in self._pushes:
+            self._add_force(self.model.geom_bodyid[push.geom], self._world_point(push.geom, push.point), push.force)
+
+    def _world_point(self, geom: int, local: np.ndarray) -> np.ndarray:
+        return self.data.geom_xpos[geom] + self.data.geom_xmat[geom].reshape(3, 3) @ local
+
+    def _add_force(self, body: int, point: np.ndarray, force: np.ndarray) -> None:
+        # xfrc_applied acts at the body's center of mass; a force at another
+        # point also twists the body: torque = lever arm x force.
+        self.data.xfrc_applied[body, :3] += force
+        self.data.xfrc_applied[body, 3:] += np.cross(point - self.data.xipos[body], force)
+
+    # ------------------------------------------------------------ run state
+
     def reset(self) -> None:
         """Back to the start: the start keyframe, or, while a controller
         drives, the state it expects (a policy: standing, as in training).
         Keeps the paused/playing state."""
         self._glide_duration[:] = 0.0
+        self._grab = None
+        self._pushes.clear()
+        self._forces_on = False
         if self.controller_active:
             self.controller.reset_state(self.data)
         else:
@@ -135,6 +238,7 @@ class Simulation:
         if self.controller_active and self._physics_steps % self.controller.decimation == 0:
             self.controller.act(self.data)
         self._update_glides()
+        self._apply_external_forces()
         mujoco.mj_step(self.model, self.data)
         self._physics_steps += 1
 

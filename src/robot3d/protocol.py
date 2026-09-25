@@ -142,8 +142,39 @@ class LoadPolicyCommand(_Message):
     checkpoint: SafeName
 
 
+FiniteVec3 = tuple[FiniteFloat, FiniteFloat, FiniteFloat]
+GeomId = Annotated[int, Field(ge=0)]
+
+
+class GrabCommand(_Message):
+    type: Literal["grab"] = "grab"
+    geom: GeomId
+    point: FiniteVec3
+    target: FiniteVec3
+
+
+class ReleaseCommand(_Message):
+    type: Literal["release"] = "release"
+
+
+class PushCommand(_Message):
+    type: Literal["push"] = "push"
+    geom: GeomId
+    point: FiniteVec3
+    direction: FiniteVec3
+    force: Annotated[FiniteFloat, Field(ge=0.0, le=1000.0)]
+
+
 ClientMessage = Annotated[
-    PlayCommand | PauseCommand | ResetCommand | SetCtrlCommand | UsePolicyCommand | LoadPolicyCommand,
+    PlayCommand
+    | PauseCommand
+    | ResetCommand
+    | SetCtrlCommand
+    | UsePolicyCommand
+    | LoadPolicyCommand
+    | GrabCommand
+    | ReleaseCommand
+    | PushCommand,
     Field(discriminator="type"),
 ]
 

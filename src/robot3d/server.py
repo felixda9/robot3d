@@ -37,9 +37,12 @@ from robot3d.protocol import (
     ClientMessage,
     ErrorMessage,
     EvaluateResponse,
+    GrabCommand,
     LoadPolicyCommand,
     PauseCommand,
     PlayCommand,
+    PushCommand,
+    ReleaseCommand,
     ResetCommand,
     RunDetail,
     RunSummary,
@@ -233,6 +236,12 @@ class SimRunner:
                     case UsePolicyCommand(active=active):
                         self.sim.use_controller(active)
                         state_changed = True
+                    case GrabCommand(geom=geom, point=point, target=target):
+                        self.sim.grab(geom, point, target)
+                    case ReleaseCommand():
+                        self.sim.release()
+                    case PushCommand(geom=geom, point=point, direction=direction, force=force):
+                        self.sim.push(geom, point, direction, force)
                     case InstallPolicy(controller=controller, label=label):
                         self.sim.set_controller(controller)  # drives now; robot restarts standing
                         self.policy_label = label
@@ -302,6 +311,14 @@ def _refusal(command: ClientMessage, sim: Simulation) -> str | None:
                 return f"unknown actuator(s): {', '.join(unknown)}"
         case UsePolicyCommand(active=True) if sim.controller is None:
             return "no policy loaded (start the server with --policy <run folder or checkpoint>)"
+        case GrabCommand() | PushCommand():
+            model = sim.model
+            if command.geom >= model.ngeom:
+                return f"no geom {command.geom}"
+            if model.body_rootid[model.geom_bodyid[command.geom]] == 0:
+                return "that's part of the static world; only the robot can be grabbed or pushed"
+            if isinstance(command, PushCommand) and not any(command.direction):
+                return "push direction is zero"
     return None
 
 
@@ -412,6 +429,7 @@ def create_app(
         client.send_frame(runner.latest_frame_json)
         clients.add(client)
         sender = asyncio.create_task(client.run_sender())
+        grabbing = False  # did this browser grab a part without letting go yet?
         try:
             while True:
                 message = await ws.receive()
@@ -433,11 +451,15 @@ def create_app(
                     problem = await load_policy(command)
                 elif problem is None:
                     runner.submit(command)
+                    if isinstance(command, (GrabCommand, ReleaseCommand)):
+                        grabbing = isinstance(command, GrabCommand)
                 if problem is not None:
                     client.send_message(ErrorMessage(message=problem).model_dump_json())
         finally:
             clients.discard(client)
             sender.cancel()
+            if grabbing:  # closed the tab mid-drag: don't keep pulling forever
+                runner.submit(ReleaseCommand())
 
     if WEB_DIST.is_dir():
         # Production: serve the built frontend. Mounted last so /ws wins.

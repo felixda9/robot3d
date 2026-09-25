@@ -65,6 +65,29 @@ body {
   margin: 0;
 }
 
+.push-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.push-box label {
+  display: flex;
+  justify-content: space-between;
+}
+
+#push-force-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.push-box input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
 #policy-box {
   display: flex;
   flex-direction: column;

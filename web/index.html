@@ -28,6 +28,10 @@
       <label class="toggle" title="Camera moves along with the robot (F)">
         <input type="checkbox" id="follow" checked /> Follow robot
       </label>
+      <div class="push-box" title="Double-click a part of the robot to push it (away from the camera), for 0.1 s">
+        <label for="push-force">Push force <span id="push-force-value"></span></label>
+        <input type="range" id="push-force" min="10" max="300" step="5" value="60" />
+      </div>
       <div id="policy-box" hidden>
         <div class="policy-label">Policy</div>
         <div id="policy-name" class="policy-name"></div>
@@ -41,7 +45,7 @@
 
     <div id="motors" class="panel"></div>
 
-    <div id="help">Mouse: left rotate, right pan, wheel zoom</div>
+    <div id="help"></div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>
