@@ -61,6 +61,7 @@ from robot3d.runs import (
     find_checkpoint,
     list_checkpoints,
     list_run_dirs,
+    needs_evaluation,
     resolve_checkpoint,
     resolve_run,
     run_detail,
@@ -120,7 +121,7 @@ class EvaluationQueue:
             self._errors.pop(run_dir.name, None)  # a new attempt
             pending = self._pending[run_dir.name]
             for checkpoint in list_checkpoints(run_dir):
-                if checkpoint.name not in pending and checkpoint.evaluation() is None:
+                if checkpoint.name not in pending and needs_evaluation(checkpoint):
                     pending.add(checkpoint.name)
                     self._queue.put(checkpoint)
                     queued += 1
@@ -141,11 +142,11 @@ class EvaluationQueue:
         self._queue.put(None)
 
     def _work(self) -> None:
-        from robot3d.policy import evaluate  # PyTorch: import only when needed
+        from robot3d.policy import evaluate, skill_test  # PyTorch: import only when needed
 
         while (checkpoint := self._queue.get()) is not None:
             try:
-                save_evaluation(checkpoint, evaluate(checkpoint, episodes=self.episodes))
+                save_evaluation(checkpoint, evaluate(checkpoint, episodes=self.episodes), skill_test(checkpoint))
             except Exception as e:
                 log.exception("evaluating %s failed", checkpoint.label)
                 with self._lock:  # shown in the dashboard, not only in this log

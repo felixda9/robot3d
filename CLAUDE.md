@@ -820,6 +820,19 @@ web/                    Vite + TypeScript + three.js frontend
     at once, hands back after 1.3–2.0 s, and the robot stands still (Stand)
     or walks on (Walk, ~0.4 m/s).
   - Adaptive learning rate: both runs trained without stalling.
+- **2026-09-25: Skill tests pick the best checkpoint** (user: "why does it
+  say 40M is the best"). The dashboard's best = highest mean return over
+  5 episodes, too noisy for these tasks: getup12_v3 40M (1000) beat 50M
+  (979) by luck of easy starts, yet failed 7/12 upside-down starts with
+  random legs that 50M passed; stand runs lost "best" to one unlucky
+  shove. → `policy.skill_test()`, deterministic and task-specific:
+  walk/stand: 32 shoves (1 and 2 m/s, 16 directions) after 3 s, survived
+  if still up 3 s later; getup: 24 hard starts (16 from the fallen bank,
+  8 upside down with random legs), passed if steady for 0.5 s within
+  10 s. EvaluationInfo gets `skill` + `skill_test`, RunSummary `task`;
+  a "Shove test"/"Get-up test" column; best = highest skill (ties: the
+  newer). Evaluations without a skill count as not evaluated, so the
+  Evaluate button fills them in.
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -865,7 +878,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 137 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 138 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after

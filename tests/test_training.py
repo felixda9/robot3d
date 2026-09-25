@@ -125,6 +125,16 @@ def test_the_getup_policy_takes_over_after_a_fall(tiny_run, tiny_stand_run, tiny
         only_getup.set_mode("walk")
 
 
+def test_skill_tests(tiny_run, tiny_getup_run):
+    from robot3d.policy import skill_test
+
+    walk = skill_test(find_checkpoint(tiny_run))
+    assert 0.0 <= walk["skill"] <= 1.0 and "shoves" in walk["skill_test"]
+    getup = skill_test(find_checkpoint(tiny_getup_run))
+    assert 0.0 <= getup["skill"] <= 1.0 and "24 fallen starts" in getup["skill_test"]
+    assert walk == skill_test(find_checkpoint(tiny_run))  # deterministic: comparable across checkpoints
+
+
 def test_policy_drives_a_live_simulation(tiny_run):
     sim = Simulation("quadruped")
     controller = PolicyController(find_checkpoint(tiny_run), sim.model)

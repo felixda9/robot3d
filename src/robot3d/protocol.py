@@ -203,6 +203,7 @@ RunStatus = Literal["running", "finished", "stopped"]
 class RunSummary(_Message):
     name: str
     robot: str
+    task: str
     backend: str
     status: RunStatus
     started: str
@@ -225,6 +226,8 @@ class EvaluationInfo(_Message):
     diagonal_sync: float | None = None
     cadence: float | None = None
     upright: float | None = None
+    skill: float | None = None
+    skill_test: str = ""
 
 
 class CheckpointInfo(_Message):

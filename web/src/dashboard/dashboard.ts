@@ -353,6 +353,7 @@ export class Dashboard {
     head.replaceChildren(title, meta);
 
     const best = bestCheckpoint(d.checkpoints);
+    const skillName = s.task === "getup" ? "Get-up test" : "Shove test";
     const seconds = duration(s.started, s.finished);
     tiles.replaceChildren(
       tile("Steps", `${formatSteps(s.steps_done)}`, `of ${formatSteps(s.total_steps)} planned`),
@@ -363,7 +364,13 @@ export class Dashboard {
         "environment steps per second",
       ),
       best
-        ? tile("Best checkpoint", `${best.evaluation!.speed.toFixed(2)} m/s`, `at ${formatSteps(best.steps)} steps, no noise`)
+        ? tile(
+            "Best checkpoint",
+            best.evaluation!.skill !== null
+              ? `${percent(best.evaluation!.skill)} ${skillName.toLowerCase()}`
+              : `${best.evaluation!.speed.toFixed(2)} m/s`,
+            `at ${formatSteps(best.steps)} steps`,
+          )
         : tile("Best checkpoint", "–", "evaluate checkpoints to find it"),
     );
 
@@ -388,7 +395,7 @@ export class Dashboard {
     head.className = "section-head";
     const h = document.createElement("h3");
     h.textContent = "Checkpoints";
-    const missing = d.checkpoints.filter((c) => c.evaluation === null).length;
+    const missing = d.checkpoints.filter((c) => c.evaluation === null || c.evaluation.skill === null).length;
     const button = document.createElement("button");
     button.textContent =
       d.evaluating > 0
@@ -397,7 +404,8 @@ export class Dashboard {
           ? "All evaluated"
           : `Evaluate ${missing} checkpoint${missing === 1 ? "" : "s"}`;
     button.disabled = d.evaluating > 0 || missing === 0;
-    button.title = "Run each checkpoint for 5 episodes without exploration noise (a few seconds each)";
+    button.title =
+      "Run each checkpoint for 5 episodes without exploration noise, plus its task's skill test (~10-30 s each)";
     button.addEventListener("click", async () => {
       button.disabled = true;
       await api.evaluate(d.summary.name);
@@ -405,9 +413,13 @@ export class Dashboard {
     });
     const note = document.createElement("p");
     note.className = "hint";
+    const skillHelp =
+      d.summary.task === "getup"
+        ? "Get-up test: 24 hard fallen starts (8 upside down with the legs anywhere); passed if standing steady within 10 s."
+        : "Shove test: 32 sudden shoves (1 and 2 m/s, 16 directions); passed if still up 3 s later.";
     note.textContent =
-      "Measured headless without exploration noise, 5 episodes each. The newest checkpoint isn't always the best. " +
-      "Gait: a walk keeps each foot down more than half the time and never has all four in the air.";
+      "Measured headless without exploration noise. Best = highest skill. " + skillHelp +
+      " Gait: a walk keeps each foot down more than half the time and never has all four in the air.";
     head.append(h, button);
     wrap.append(head, note);
     if (d.evaluation_error) {
@@ -422,6 +434,7 @@ export class Dashboard {
     const header = table.createTHead().insertRow();
     for (const [label, help] of [
       ["Checkpoint", ""],
+      [d.summary.task === "getup" ? "Get-up test" : "Shove test", "The task's skill test: share passed (see above)"],
       ["Speed", "Average forward speed"],
       ["Distance", "Meters walked forward per episode"],
       ["Falls", "Episodes that ended with the robot falling over"],
@@ -452,6 +465,7 @@ export class Dashboard {
         name.append(" ", pill);
       }
       const e = c.evaluation;
+      row.insertCell().textContent = percent(e?.skill);
       row.insertCell().textContent = e ? `${e.speed.toFixed(2)} m/s` : "–";
       row.insertCell().textContent = e ? `${e.distance.toFixed(1)} m` : "–";
       row.insertCell().textContent = e ? `${e.falls}/${e.episodes}` : "–";
@@ -491,10 +505,25 @@ function toSeries(key: string, label: string, slot: number, s: ScalarSeries): Ch
   return { key, label, color: `var(--series-${slot})`, steps: s.steps, values: s.values };
 }
 
+/**
+ * Highest skill test score (ties: the newer checkpoint); for evaluations
+ * without one, the highest mean return. (The mean return over 5 episodes is
+ * noisy: one unlucky shove or a lucky set of easy starts decides it.)
+ */
 function bestCheckpoint(checkpoints: CheckpointInfo[]): CheckpointInfo | null {
+  const score = (c: CheckpointInfo): [number, number] => {
+    const e = c.evaluation!;
+    return e.skill !== null ? [1, e.skill] : [0, e.mean_return];
+  };
   let best: CheckpointInfo | null = null;
   for (const c of checkpoints) {
-    if (c.evaluation && (!best || c.evaluation.mean_return > best.evaluation!.mean_return)) best = c;
+    if (!c.evaluation) continue;
+    if (!best) {
+      best = c;
+      continue;
+    }
+    const [a, b] = [score(c), score(best)];
+    if (a[0] > b[0] || (a[0] === b[0] && a[1] >= b[1])) best = c; // >=: ties go to the newer one
   }
   return best;
 }

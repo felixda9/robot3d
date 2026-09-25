@@ -307,6 +307,8 @@ export interface RunSummary {
   /** Folder name under runs/. */
   name: string;
   robot: string;
+  /** What it was trained for: "walk", "stand" or "getup". */
+  task: string;
   /** Where it trained: "cpu" (Stable-Baselines3) or "gpu" (MuJoCo Warp + GPU PPO). */
   backend: string;
   status: RunStatus;
@@ -340,6 +342,14 @@ export interface EvaluationInfo {
   cadence: number | null;
   /** Share of the time not fallen (null in older evaluations). For standing policies: includes getting up from fallen starts. */
   upright: number | null;
+  /**
+   * The task's skill test, share passed 0..1 (null until tested): walk and
+   * stand survive sudden shoves; getup gets up from hard fallen starts. The
+   * best checkpoint is the one with the highest skill.
+   */
+  skill: number | null;
+  /** What the skill test tested, e.g. "shoves of 1 and 2 m/s from 16 directions". */
+  skill_test: string;
 }
 
 export interface CheckpointInfo {

@@ -108,8 +108,9 @@ def find_checkpoint(path: str | Path) -> Checkpoint:
     return checkpoints[-1]
 
 
-def save_evaluation(checkpoint: Checkpoint, results: list[dict]) -> EvaluationInfo:
-    """Store evaluate() results next to the checkpoint (the dashboard shows them)."""
+def save_evaluation(checkpoint: Checkpoint, results: list[dict], skill: dict | None = None) -> EvaluationInfo:
+    """Store evaluate() results (and a skill_test() result) next to the
+    checkpoint (the dashboard shows them)."""
     n = len(results)
 
     def mean_of(key: str) -> float | None:
@@ -127,6 +128,7 @@ def save_evaluation(checkpoint: Checkpoint, results: list[dict]) -> EvaluationIn
         diagonal_sync=mean_of("diagonal_sync"),
         cadence=mean_of("cadence"),
         upright=mean_of("upright"),
+        **(skill or {}),
     )
     checkpoint.eval_path.write_text(info.model_dump_json(indent=2) + "\n")
     return info
@@ -198,11 +200,25 @@ def run_status(run_dir: Path, info: dict) -> RunStatus:
     return "running" if time.time() - last_activity < _RUNNING_IF_ACTIVE_WITHIN else "stopped"
 
 
+def run_task(info: dict) -> str:
+    """"walk", "stand" or "getup" (runs before the task setting: getup if
+    falls didn't end its episodes, as WalkConfig.from_run)."""
+    walk = info.get("walk_config", {})
+    return walk.get("task") or ("getup" if walk.get("terminate_on_fall") is False else "walk")
+
+
+def needs_evaluation(checkpoint: Checkpoint) -> bool:
+    """Not evaluated yet, or evaluated before the skill test existed."""
+    evaluation = checkpoint.evaluation()
+    return evaluation is None or evaluation.skill is None
+
+
 def run_summary(run_dir: Path) -> RunSummary:
     info = read_run_info(run_dir)
     return RunSummary(
         name=run_dir.name,
         robot=info.get("robot", "?"),
+        task=run_task(info),
         backend=info.get("backend", "cpu"),  # runs from before GPU training existed were CPU
         status=run_status(run_dir, info),
         started=info.get("started", ""),

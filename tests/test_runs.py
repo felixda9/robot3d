@@ -66,6 +66,13 @@ def test_evaluation_cache(tiny_run):
     info = save_evaluation(checkpoint, results)
     assert (info.duty_factor, info.airborne, info.diagonal_sync, info.cadence) == (0.6, 0.0, 0.9, 2.0)
     assert checkpoint.evaluation() == info
+
+    # Without a skill test result it still needs evaluating (for the dashboard's "best"); with one, not.
+    from robot3d.runs import needs_evaluation
+
+    assert needs_evaluation(checkpoint)
+    info = save_evaluation(checkpoint, results, {"skill": 0.75, "skill_test": "shoves"})
+    assert (info.skill, info.skill_test) == (0.75, "shoves") and not needs_evaluation(checkpoint)
     checkpoint.eval_path.unlink()
     assert checkpoint.evaluation() is None
 

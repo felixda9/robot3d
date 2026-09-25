@@ -241,3 +241,94 @@ class Behaviors:
                     self.recovering = False  # up again: back to the mode's policy
                     self.active.reset()
         self.active.act(data)
+
+
+# ------------------------------------------------------------- skill tests
+
+SHOVE_TEST_SPEEDS = (1.0, 2.0)  # m/s (the viewer's push slider: ~70 and ~140 N)
+SHOVE_TEST_DIRECTIONS = 16
+GETUP_TEST_BANK_STARTS = 16
+GETUP_TEST_UPSIDE_DOWN = 8
+
+
+def skill_test(checkpoint: Checkpoint) -> dict:
+    """A fixed, task-specific test of what the policy is for; the dashboard's
+    "Skill" column and its choice of the best checkpoint. (The mean return
+    over a few episodes was too noisy to pick one: one unlucky shove, or a
+    lucky set of easy starts, decided it.)
+
+    walk, stand: a shove test. For each of SHOVE_TEST_SPEEDS and
+        SHOVE_TEST_DIRECTIONS: 3 s of walking/standing, one sudden shove,
+        survived if not fallen 3 s later.
+    getup: GETUP_TEST_BANK_STARTS fallen poses from the fallen bank plus
+        GETUP_TEST_UPSIDE_DOWN upside down with random leg angles; passed if
+        standing steady (WalkTask.steady) for 0.5 s within 10 s.
+    Returns {"skill": share passed (0..1), "skill_test": what was tested}.
+    """
+    import dataclasses
+
+    from robot3d.envs import WalkEnv
+
+    info = checkpoint.run_info()
+    config = dataclasses.replace(WalkConfig.from_run(info["walk_config"]), push_interval=0.0)
+    env = WalkEnv(info["robot"], config)
+    controller = PolicyController(checkpoint, env.model)
+    task, model, data = env.task, env.model, env.data
+    steps = lambda seconds: round(seconds / task.control_dt)  # noqa: E731
+
+    if config.task != "getup":
+        passed = total = 0
+        for speed in SHOVE_TEST_SPEEDS:
+            for k in range(SHOVE_TEST_DIRECTIONS):
+                env.reset(seed=k)
+                controller.reset()
+                for _ in range(steps(3.0)):
+                    env.step(controller.action(data))
+                angle = 2 * np.pi * k / SHOVE_TEST_DIRECTIONS
+                data.qvel[0:2] += speed * np.array([np.cos(angle), np.sin(angle)])
+                fell = False
+                for _ in range(steps(3.0)):
+                    env.step(controller.action(data))
+                    if task.fell(data):
+                        fell = True
+                        break
+                total += 1
+                passed += not fell
+        speeds = " and ".join(f"{s:g}" for s in SHOVE_TEST_SPEEDS)
+        return {"skill": passed / total,
+                "skill_test": f"shoves of {speeds} m/s from {SHOVE_TEST_DIRECTIONS} directions"}
+
+    rng = np.random.default_rng(0)
+    bank_qpos, bank_qvel = task.fallen_states
+    starts = [(bank_qpos[i], bank_qvel[i])
+              for i in np.linspace(0, len(bank_qpos) - 1, GETUP_TEST_BANK_STARTS).astype(int)]
+    for _ in range(GETUP_TEST_UPSIDE_DOWN):  # upside down, any heading, legs anywhere
+        mujoco.mj_resetData(model, data)
+        data.qpos[:] = task.standing_qpos
+        angles = rng.uniform(task.joint_range[:, 0], task.joint_range[:, 1])
+        data.qpos[task.joint_qpos] = angles
+        data.ctrl[:] = np.clip(angles, task.ctrl_low, task.ctrl_high)
+        yaw = rng.uniform(0, 2 * np.pi)
+        data.qpos[3:7] = [0.0, np.cos(yaw / 2), np.sin(yaw / 2), 0.0]  # rolled over, then turned
+        data.qpos[2] = 0.25
+        mujoco.mj_forward(model, data)
+        for _ in range(round(0.5 / model.opt.timestep)):  # land, joints held
+            mujoco.mj_step(model, data)
+        starts.append((data.qpos.copy(), data.qvel.copy()))
+    passed = 0
+    for i, (qpos, qvel) in enumerate(starts):
+        env.reset(seed=i)
+        data.qpos[:] = qpos
+        data.qvel[:] = qvel
+        mujoco.mj_forward(model, data)
+        env._steps = 0
+        controller.reset()
+        steady = 0
+        for _ in range(steps(10.0)):
+            env.step(controller.action(data))
+            steady = steady + 1 if task.steady(data) else 0
+            if steady >= steps(0.5):
+                passed += 1
+                break
+    return {"skill": passed / len(starts),
+            "skill_test": f"{len(starts)} fallen starts ({GETUP_TEST_UPSIDE_DOWN} upside down), up within 10 s"}
