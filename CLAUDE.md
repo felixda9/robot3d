@@ -304,14 +304,30 @@ web/                    Vite + TypeScript + three.js frontend
 
 **Milestone 4 done (2026-09-24), waiting for the user to test.** (M3
 confirmed by the user.)
-- The user chose: CPU-only torch; **smoke test only** (the user runs the
-  full training themselves).
-- Smoke run (`runs/smoke`, 300k steps, 68 s, 14 envs):
-  - ep_rew_mean 65 → 639; speed −0.12 → +0.58 m/s (with exploration noise).
-  - Deterministic evaluation: the 100k/200k checkpoints stand still, the 300k
-    checkpoint goes 3.5–4 m in 20 s with no falls.
-  - The early progress came partly from the noise itself; the full 10M run
-    should form a real gait. **Not yet verified.**
+- The user chose CPU-only torch. They first asked for a smoke test only
+  (`runs/smoke`, 300k steps, 68 s), then asked me to run the full training.
+- **First full run `runs/walk_10m`** (10M steps, 14 envs, 33m49s, ~4.9k steps/s):
+  - The robot learned a **canter** by ~4M steps: 3-beat, RR → FR+RL together
+    → FL, airborne ~30–34% of the cycle, ~4.2 steps/s per foot.
+  - No falls at any checkpoint in deterministic evaluation (5 episodes each).
+  - Return plateaus ~1420 from 4.5M on.
+  - **Best: step_009000012**, 1.43 m/s (28.7 m in 20 s), return 1423.5,
+    31 W mean motor power (58 W at 1M, 42 W at 4M).
+  - The newest checkpoint (10,006,528) is weaker (1.17 m/s, return 1379).
+    `--policy runs/walk_10m` picks the newest, so pass the 9M .zip explicitly.
+  - Gait at 1M: front legs hopped together and RL skittered (19
+    touchdowns/s, 0.41 m/s slip). Gone by 4M.
+  - Remaining flaw: feet slide ~0.25 m/s while touching the floor.
+- **PPO instability found:** approx_kl spiked late in training (1.2 at
+  4.5M, 2.7 at 5M, 4.7 at 6M, 6.5 at 7.08M; 14 updates > 0.05; clip fraction
+  ~0.3).
+  - Cause: the policy std collapsed to 0.064 (from 0.37) while lr stayed at
+    3e-4, so small action changes = huge KL.
+  - Snapshots right after spikes were bad: 2.5M (0.13 m/s) and 7.0M
+    (0.56 m/s). Training recovered each time.
+  - **Suggested fixes for the next run** (not applied yet; user to decide):
+    `target_kl≈0.02`, linear lr decay, possibly a std floor or a small
+    ent_coef, and a foot-slip penalty in the reward.
 - Web verified in headless Edge: the policy walks 2.9 m in 8 s; sliders
   are locked and move with it; P and F work; no console errors.
 - TensorBoard serves all SB3 and custom scalars.
@@ -323,6 +339,9 @@ confirmed by the user.)
 
 ## Notes for later milestones
 
+- M5: the dashboard should show per-checkpoint evaluation (distance, speed,
+  falls, return), because the newest checkpoint isn't always the best (see
+  walk_10m). Maybe cache evaluate() results next to each checkpoint.
 - M5: runs/<name>/run.json has the settings plus progress (`finished`,
   `steps_done`, `interrupted`, `final_checkpoint`).
   `policy.list_checkpoints()` exists. TensorBoard event files can be read
