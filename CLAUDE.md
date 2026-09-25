@@ -545,6 +545,10 @@ web/                    Vite + TypeScript + three.js frontend
     `trot_clock_15` = 1.5 Hz (`train_gpu.py --gait-hz 1.5`, ~27 cm
     strides) for comparison with 2 Hz; the winner sets the default
     gait_frequency.
+  - `trot_clock_15` result (1.5 Hz, 50M steps): 0 falls from 7.6M on;
+    at 50M 0.40 m/s, 1.47 steps per foot per second (~27 cm per cycle),
+    feet down 59%, diagonal sync 0.99, feet lift 6.5–8 cm (higher than
+    at 2 Hz: the longer swing leaves more time), motor power ~25 W (same).
 - **2026-09-25: Mouse grab and push (5c step 1):**
   - Protocol: `grab {geom, point, target}` (resent as the mouse moves),
     `release`, `push {geom, point, direction, force}`. Points are in the
@@ -583,8 +587,9 @@ web/                    Vite + TypeScript + three.js frontend
 - Two walkers, both trained on the GPU in ~16 min with our PPO, both
   0.4 m/s trot-walks without falls: `trot_ppo` (no clock: longer, calmer
   strides) and `trot_clock` (gait clock: 2 steps/s, higher lifts). The
-  user prefers the clock (more consistent). `trot_clock_15` (1.5 Hz) is
-  training; next: the user compares it with the 2 Hz walker.
+  user prefers the clock (more consistent). `trot_clock_15` (1.5 Hz,
+  ~27 cm strides, higher lifts) is done too; waiting for the user to pick
+  1.5 or 2 Hz as the default.
 - Milestone 5c (robustness) started: step 1, mouse grab + push, is done;
   waiting for the user to try it before step 2 (12-motor robot).
 - `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
