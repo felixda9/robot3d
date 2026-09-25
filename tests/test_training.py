@@ -178,6 +178,13 @@ def test_skill_tests(tiny_run, tiny_getup_run):
     assert walk == skill_test(find_checkpoint(tiny_run))  # deterministic: comparable across checkpoints
 
 
+def test_jump_skill_test(tiny_jump_run):
+    from robot3d.policy import skill_test
+
+    jump = skill_test(find_checkpoint(tiny_jump_run))
+    assert 0.0 <= jump["skill"] <= 1.0 and "8 jumps" in jump["skill_test"] and "median height" in jump["skill_test"]
+
+
 def test_policy_drives_a_live_simulation(tiny_run):
     sim = Simulation("quadruped")
     controller = PolicyController(find_checkpoint(tiny_run), sim.model)

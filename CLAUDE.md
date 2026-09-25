@@ -96,7 +96,8 @@ MuJoCo is the physics engine; everything around it is built here.
 
 ```
 robots/                 MJCF robot files (data, not code): quadruped.xml (8 motors),
-                        quadruped12.xml (12 motors: + a sideways "roll" joint per hip)
+                        quadruped12.xml (12 motors: + a sideways "roll" joint per hip),
+                        humanoid.xml (21 motors, child-size biped with arms)
 src/robot3d/
   robots.py             load_model(), reset_to_keyframe()
   simulation.py         Simulation: model + state + real-time pacing (shared loop)
@@ -905,6 +906,29 @@ web/                    Vite + TypeScript + three.js frontend
     `--init` widens first layers for appended inputs. SetCommandCommand,
     StatusMessage steerable / command_limits; viewer steering.ts (WASD/
     arrows/QE, gamepad sticks). `steer12` training (from walk12_robust, 80M).
+- **2026-09-25: The humanoid (M8)**, `robots/humanoid.xml`: ~1.0 m (head
+  top 0.999 m), 19.0 kg, 21 motors (I had quoted "~21" for 6 + 6 + 3 + 3 +
+  1 = 19; the waist got roll and pitch too, as on Unitree G1):
+  - legs: hip yaw/roll/pitch, knee, ankle pitch/roll (thigh and shin
+    0.22 m, box feet 18 × 9 cm); waist yaw/roll/pitch; arms: shoulder
+    pitch/roll, elbow. Pelvis 3 kg (the free root, body 1), torso 6 kg,
+    head 1 kg with a dark visor marking the face.
+  - motors: hips/knees kp 150 ±80 N·m, hip yaw/roll kp 100 ±50, ankles
+    kp 80 ±40, waist kp 100 ±40, arms kp 30 ±15.
+  - collisions: parts hit the floor, not each other, except lower legs and
+    feet, which hit each other (feet can't pass through each other).
+  - home: hip −0.25, knee 0.5, ankle −0.25 (feet flat), arms slightly out
+    and bent; presets crouch, arms_out. It stands on its own (pelvis
+    0.53 m, only the feet touching); tests/test_humanoid.py.
+  - Task generalized for bipeds: soles of box feet (half-height), left and
+    right half a cycle apart, "support" = at least half the feet down,
+    pushes on the root body's box, higher drops for the fallen bank.
+  - `WalkConfig.for_robot` + `ROBOT_SETTINGS`: the humanoid's walk has no
+    roll penalty (hip/ankle roll balance a biped), falls at 60° tilt or
+    pelvis < 60% height, gentler shoves (0.5 → 1.5 m/s). train_gpu.py
+    applies it. `humanoid_walk` training (100M steps).
+- **2026-09-25: Jump skill test**: 8 jumps from standing, passed if landed
+  (≥ 60 ms airborne) and steady within 3 s; reports the median height.
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -951,7 +975,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 151 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 156 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after

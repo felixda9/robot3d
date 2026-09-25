@@ -354,7 +354,7 @@ export class Dashboard {
     head.replaceChildren(title, meta);
 
     const best = bestCheckpoint(d.checkpoints);
-    const skillName = s.task === "getup" ? "Get-up test" : "Push test";
+    const skillName = s.task === "getup" ? "Get-up test" : s.task === "jump" ? "Jump test" : "Push test";
     const seconds = duration(s.started, s.finished);
     tiles.replaceChildren(
       tile("Steps", `${formatSteps(s.steps_done)}`, `of ${formatSteps(s.total_steps)} planned`),
@@ -417,11 +417,14 @@ export class Dashboard {
     });
     const note = document.createElement("p");
     note.className = "hint";
+    const task = d.summary.task;
     const skillHelp =
-      d.summary.task === "getup"
+      task === "getup"
         ? "Get-up test: 24 hard fallen starts (8 upside down with the legs anywhere); passed if standing steady within 10 s."
-        : "Push test: 32 pushes like the viewer's (72 and 144 N for 0.1 s on the torso's side, 16 directions); " +
-          "passed if still up 3 s later.";
+        : task === "jump"
+          ? "Jump test: 8 jumps; passed if it lands and stands steady within 3 s (the column's tooltip: median height)."
+          : "Push test: 32 pushes like the viewer's (72 and 144 N for 0.1 s on the torso's side, 16 directions); " +
+            "passed if still up 3 s later.";
     note.textContent =
       "Measured headless without exploration noise. Best = highest skill. " + skillHelp +
       " Gait: a walk keeps each foot down more than half the time and never has all four in the air.";
@@ -439,7 +442,8 @@ export class Dashboard {
     const header = table.createTHead().insertRow();
     for (const [label, help] of [
       ["Checkpoint", ""],
-      [d.summary.task === "getup" ? "Get-up test" : "Push test", "The task's skill test: share passed (see above)"],
+      [task === "getup" ? "Get-up test" : task === "jump" ? "Jump test" : "Push test",
+       "The task's skill test: share passed (see above)"],
       ["Speed", "Average forward speed"],
       ["Distance", "Meters walked forward per episode"],
       ["Falls", "Episodes that ended with the robot falling over"],
@@ -470,7 +474,9 @@ export class Dashboard {
         name.append(" ", pill);
       }
       const e = c.evaluation;
-      row.insertCell().textContent = percent(e?.skill);
+      const skillCell = row.insertCell();
+      skillCell.textContent = percent(e?.skill);
+      if (e?.skill_test) skillCell.title = e.skill_test;
       row.insertCell().textContent = e ? `${e.speed.toFixed(2)} m/s` : "–";
       row.insertCell().textContent = e ? `${e.distance.toFixed(1)} m` : "–";
       row.insertCell().textContent = e ? `${e.falls}/${e.episodes}` : "–";

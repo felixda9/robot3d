@@ -303,6 +303,7 @@ class Behaviors:
 
 SHOVE_TEST_SPEEDS = (1.0, 2.0)  # m/s of push (quadruped12: 72 and 144 N on the viewer's slider)
 SHOVE_TEST_DIRECTIONS = 16
+JUMP_TEST_JUMPS = 8
 GETUP_TEST_BANK_STARTS = 16
 GETUP_TEST_UPSIDE_DOWN = 8
 
@@ -319,6 +320,9 @@ def skill_test(checkpoint: Checkpoint) -> dict:
         one push, survived if not fallen 3 s later. (v1 used velocity kicks at
         the center of mass: far easier than the viewer's pushes, which also
         tip the robot; stand12_v3 scored 78% yet fell to 60 N side pushes.)
+    jump: JUMP_TEST_JUMPS jumps from standing; passed if it landed (after
+        >= 60 ms in the air) and stood steady within the jump's 3 s. The
+        description reports the median jump height (torso rise at the top).
     getup: GETUP_TEST_BANK_STARTS fallen poses from the fallen bank plus
         GETUP_TEST_UPSIDE_DOWN upside down with random leg angles; passed if
         standing steady (WalkTask.steady) for 0.5 s within 10 s.
@@ -334,6 +338,28 @@ def skill_test(checkpoint: Checkpoint) -> dict:
     controller = PolicyController(checkpoint, env.model)
     task, model, data = env.task, env.model, env.data
     steps = lambda seconds: round(seconds / task.control_dt)  # noqa: E731
+
+    if config.task == "jump":
+        passed, heights = 0, []
+        for k in range(JUMP_TEST_JUMPS):
+            env.reset(seed=k)
+            controller.reset()
+            top, steady, flight, landed, ok = data.qpos[2], 0, 0, False, False
+            for _ in range(task.max_steps):
+                env.step(controller.action(data))
+                top = max(top, data.qpos[2])
+                _, flight, landed = task.jump_update(flight, landed, task.feet_state(data)[1])
+                steady = steady + 1 if landed and task.steady(data) else 0
+                if task.fell(data):
+                    break
+                if steady >= steps(0.5):
+                    ok = True
+                    break
+            passed += ok
+            heights.append(top - task.standing_height)
+        return {"skill": passed / JUMP_TEST_JUMPS,
+                "skill_test": f"{SKILL_TEST_VERSION}: {JUMP_TEST_JUMPS} jumps, landed and steady "
+                              f"(median height {np.median(heights) * 100:.0f} cm)"}
 
     if config.task != "getup":
         passed = total = 0
