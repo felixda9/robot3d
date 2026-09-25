@@ -6,6 +6,7 @@
     uv run scripts/train_gpu.py --gait-hz 1.5            # slower stepping rhythm (0 = no gait clock)
     uv run scripts/train_gpu.py --task stand --robot quadruped12   # stand still, catch shoves
     uv run scripts/train_gpu.py --task getup --robot quadruped12   # get up after falls
+    uv run scripts/train_gpu.py --robot quadruped12 --init runs/walk12_tidy   # fine-tune a walker
 
 Needs an NVIDIA GPU and the CUDA build of PyTorch. Watch it in the web UI's
 Training tab (same metrics as CPU runs); replay any checkpoint from there, or
@@ -39,6 +40,7 @@ def main() -> None:
     parser.add_argument("--checkpoint-every", type=float, default=5e6, help="steps between checkpoints")
     parser.add_argument("--epochs", type=int, help="passes over each rollout (default: trainer's own)")
     parser.add_argument("--minibatches", type=int, help="minibatches per epoch (default: trainer's own)")
+    parser.add_argument("--init", help="fine-tune from this run (newest checkpoint) or .pt checkpoint (our PPO)")
     parser.add_argument("--gait-hz", type=float,
                         help=f"gait clock: steps per foot per second (default {WalkConfig.gait_frequency}; 0 = no clock)")
     args = parser.parse_args()
@@ -60,9 +62,17 @@ def main() -> None:
     common = dict(robot=args.robot, total_steps=int(args.steps), name=name, seed=args.seed,
                   checkpoint_every=int(args.checkpoint_every), walk=walk)
     if args.trainer == "rsl":
+        if args.init:
+            raise SystemExit("--init works with --trainer ppo only")
         run_dir = train_rsl(**common, rsl=RslConfig(num_envs=args.envs, **overrides))
     else:
-        run_dir = train_gpu(**common, ppo=GpuPPOConfig(num_envs=args.envs, **overrides))
+        init_from = None
+        if args.init:
+            from robot3d.runs import find_checkpoint
+
+            init_from = find_checkpoint(args.init).model_path
+            print(f"Starting from {init_from}")
+        run_dir = train_gpu(**common, ppo=GpuPPOConfig(num_envs=args.envs, **overrides), init_from=init_from)
     print(f"\nDone. Checkpoints in {run_dir / 'checkpoints'}")
     print("Compare it with other runs in the web UI's Training tab, or watch it:")
     print(f"  uv run scripts/serve.py --policy {run_dir.relative_to(RUNS_DIR.parent)}")

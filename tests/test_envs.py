@@ -338,6 +338,38 @@ def test_random_shoves(env):
     assert WalkConfig().push_interval > 0  # new runs train with them
 
 
+def test_shoves_come_from_every_direction_with_a_twist():
+    from robot3d.walk import WalkConfig
+
+    env = WalkEnv("quadruped", WalkConfig(push_interval=0.2, push_max_speed=1.0, push_max_spin=0.5))
+    env.reset(seed=3)
+    kicks, spins = [], []
+    for _ in range(300):
+        before = env.data.qvel[:6].copy()
+        next_push = env._next_push
+        pushed = env._steps >= next_push
+        env.step(np.zeros(8))
+        if pushed:
+            # (the step's physics adds a little on top of the kick)
+            kicks.append(env.data.qvel[:2] - before[:2])
+            spins.append(env.data.qvel[3:6] - before[3:6])
+    kicks = np.array(kicks)
+    assert len(kicks) > 20
+    angles = np.arctan2(kicks[:, 1], kicks[:, 0])
+    assert np.histogram(angles, bins=4, range=(-np.pi, np.pi))[0].min() > 0  # all four quadrants
+    assert np.abs(np.array(spins)).max() > 0.2  # twisted too
+
+
+def test_gait_rules_pause_while_knocked_off_speed(env):
+    c = env.task.config
+    assert c.constraint_gate_speed_error == 0.5
+    on_track = reward_terms(env.task, vx=c.target_speed, feet_down=(1, 0, 0, 0), phase=0.3)
+    knocked = reward_terms(env.task, vx=c.target_speed + 0.8, feet_down=(1, 0, 0, 0), phase=0.3)
+    assert on_track["support"] < 0 and on_track["gait"] > 0
+    assert knocked["support"] == knocked["gait"] == knocked["clearance"] == 0.0
+    assert knocked["tracking"] < 0.01 * on_track["tracking"]  # being off speed still costs: no point triggering it
+
+
 def test_air_time_bookkeeping(env):
     task = env.task
     down, air = np.ones(4, bool), np.zeros(4)
@@ -357,7 +389,8 @@ def test_first_task_runs_keep_their_reward():
 
     # run.json of the first task (walk_10m etc.) saved forward_weight=1.0 and no walk terms
     newer = ("tracking_weight", "support_weight", "trot_weight", "air_time_weight", "gait_frequency",
-             "gait_weight", "clearance_weight", "push_interval", "velocity_frame", "turn_weight", "roll_weight")
+             "gait_weight", "clearance_weight", "push_interval", "velocity_frame", "turn_weight", "roll_weight",
+             "push_direction", "push_max_spin", "push_curriculum_max", "constraint_gate_speed_error")
     saved = {k: v for k, v in WalkConfig().to_dict().items() if k not in newer}
     saved["forward_weight"] = 1.0
     old = WalkConfig.from_run(saved)
@@ -367,6 +400,7 @@ def test_first_task_runs_keep_their_reward():
     assert old.push_interval == 0.0  # no shoves either
     assert (old.velocity_frame, old.turn_weight) == ("world", 0.0)  # speed along world +x, no turn term
     assert old.roll_weight == 0.0
+    assert (old.push_max_spin, old.push_curriculum_max, old.constraint_gate_speed_error) == (0.0, 0.0, 0.0)
 
 
 def test_runs_before_the_clock_keep_their_observation(env):

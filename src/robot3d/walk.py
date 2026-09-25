@@ -120,9 +120,12 @@ class WalkConfig:
     # costly. Only matters when falls don't end the episode.
     posture_gating: bool = False
 
-    # --- falling: tilted more than 60 degrees, or torso below half its standing height
-    min_up_z: float = 0.5
-    min_height_fraction: float = 0.5
+    # --- falling: tilted more than ~80 degrees (up_z < 0.17), or the torso
+    # nearly on the floor (< 30% of standing height). Was 60 deg / 50% until
+    # walk12_tidy: the walker never practised saving itself from a deep lean
+    # (reference projects end at 70 deg, or only upside down).
+    min_up_z: float = 0.17
+    min_height_fraction: float = 0.3
     terminate_on_fall: bool = True  # walking: a fall ends the episode. Standing: it goes on; get up!
 
     # --- start of each episode: the settled standing pose plus random noise,
@@ -135,8 +138,22 @@ class WalkConfig:
     # forward/back and sideways each uniform in +-push_max_speed, like being
     # bumped into. The policy isn't told; it feels the stumble and must catch
     # itself. (legged_gym does the same, every 15 s.) 0 = no pushes.
-    push_interval: float = 4.0  # s
+    push_interval: float = 2.0  # s (each gap 1-3 s, as mjlab; walk12_tidy: 4 s)
     push_max_speed: float = 1.0  # m/s
+    # "circle": a random direction, size uniform up to the max (pure forward
+    # or sideways shoves reach it too). "axes" (until walk12_tidy): x and y
+    # each uniform in +-max, so straight shoves never exceeded 1 m/s.
+    push_direction: str = "circle"
+    push_max_spin: float = 0.5  # rad/s: also kick the torso's roll/pitch/yaw rate by up to this (mjlab: ~0.5)
+    # Shove curriculum (GPU training; > 0 = on): each robot's max shove starts
+    # at push_max_speed, grows by push_curriculum_step every episode it
+    # survives, shrinks by it after a fall, up to this.
+    push_curriculum_max: float = 3.0
+    push_curriculum_step: float = 0.25  # (1 -> 3 m/s takes 8 survived episodes)
+    # > 0 (m/s): gait, clearance, support and roll terms apply only while the
+    # speed is within this of the target, so a shoved robot may step however
+    # it needs to catch itself; they return once it's back on track.
+    constraint_gate_speed_error: float = 0.5
 
     # --- starting fallen (get-up task): this share of episodes starts from
     # a random fallen pose (on its side, back, belly...).
@@ -217,6 +234,10 @@ class WalkConfig:
             roll_weight=0.0,  # getting up needs the roll joints freely
             fall_penalty=0.0,
             terminate_on_fall=False,
+            # "fallen" here (its statistics, and which starts count as fallen):
+            # tilted past 60 deg or below half height, as before.
+            min_up_z=0.5,
+            min_height_fraction=0.5,
             fallen_start_fraction=0.6,
             push_interval=0.0,
             episode_seconds=6.0,
@@ -241,6 +262,10 @@ class WalkConfig:
             "velocity_frame": "world",
             "turn_weight": 0.0,
             "roll_weight": 0.0,
+            "push_direction": "axes",
+            "push_max_spin": 0.0,
+            "push_curriculum_max": 0.0,
+            "constraint_gate_speed_error": 0.0,
         }
         if "task" not in saved:  # before the task field: the stand12* runs were get-up runs
             saved = {**saved, "task": "getup" if saved.get("terminate_on_fall") is False else "walk"}
@@ -408,6 +433,9 @@ class WalkTask:
         """
         c = self.config
         upright = min(max(up_z, 0.0), 1.0) if c.posture_gating else 1.0  # see WalkConfig.posture_gating
+        # constraint_gate_speed_error: gait rules pause while knocked off speed
+        balanced = float(c.constraint_gate_speed_error <= 0
+                         or math.hypot(vx - c.target_speed, vy) < c.constraint_gate_speed_error)
         # stillness_speed_gate: calm terms only while not being shoved along
         calm = float(c.stillness_speed_gate <= 0 or math.hypot(vx, vy) < c.stillness_speed_gate)
         is_up = float(up_z > c.upright_gate)
@@ -428,18 +456,18 @@ class WalkTask:
             "upright": c.upright_weight * up_z,
             "trot": c.trot_weight * (float(np.mean(diagonal_sync)) if diagonal_sync else 0.0),
             "air_time": c.air_time_weight * float(np.sum(np.where(landed, extra_air, 0.0))),
-            "gait": c.gait_weight * gait,
-            "clearance": c.clearance_weight * clearance,
+            "gait": c.gait_weight * balanced * gait,
+            "clearance": c.clearance_weight * balanced * clearance,
             "turn": c.turn_weight * upright * math.exp(-(turn_rate**2) / c.turn_sigma),
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * float(np.sum((action - last_action) ** 2)),
             "slip": -c.slip_weight * foot_slip,
-            "support": -c.support_weight * float(np.sum(feet_down) < 2),
+            "support": -c.support_weight * balanced * float(np.sum(feet_down) < 2),
             "fall": -c.fall_penalty if fell and c.terminate_on_fall else 0.0,
             "height": c.height_weight * min(max(height / self.standing_height, 0.0), 1.0),
             "pose": c.pose_weight * upright * calm * is_up * math.exp(-float(np.sum(joint_offset**2)) / c.pose_sigma),
             "down": -c.down_weight * float(fell),
-            "roll": -c.roll_weight * float(np.sum(joint_offset[self.roll_motors] ** 2)),
+            "roll": -c.roll_weight * balanced * float(np.sum(joint_offset[self.roll_motors] ** 2)),
             "success": c.success_bonus * float(succeeded),
             "joint_speed": -c.joint_speed_weight * calm * float(np.sum(joint_velocity**2)),
             "wobble": -c.wobble_weight * calm * float(angular_velocity[0] ** 2 + angular_velocity[1] ** 2),

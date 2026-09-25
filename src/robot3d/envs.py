@@ -63,7 +63,14 @@ class WalkEnv(gym.Env):
         if c.push_interval > 0 and self._steps >= self._next_push:
             # A shove: the torso's horizontal velocity (free joint qvel[0:2],
             # world frame) jumps, as if bumped into (see WalkConfig.push_interval).
-            data.qvel[0:2] += self.np_random.uniform(-c.push_max_speed, c.push_max_speed, 2)
+            if c.push_direction == "circle":
+                angle = self.np_random.uniform(0, 2 * np.pi)
+                size = self.np_random.uniform(0, c.push_max_speed)
+                data.qvel[0:2] += size * np.array([np.cos(angle), np.sin(angle)])
+            else:
+                data.qvel[0:2] += self.np_random.uniform(-c.push_max_speed, c.push_max_speed, 2)
+            if c.push_max_spin > 0:  # and a twist (qvel[3:6]: torso angular velocity, its own frame)
+                data.qvel[3:6] += self.np_random.uniform(-c.push_max_spin, c.push_max_spin, 3)
             self._next_push = self._steps + self._push_delay()
 
         x_before, y_before = data.qpos[0], data.qpos[1]

@@ -62,6 +62,7 @@ class RolloutLog:
         self.distance: list[float] = []
         self.speed: list[float] = []
         self.fell: list[float] = []
+        self.extra: dict[str, list[float]] = {}  # StepResult.stats, averaged over the rollout
 
     def record(self, result) -> None:
         self.steps += 1
@@ -74,6 +75,8 @@ class RolloutLog:
             self.distance.extend(result.episode_distance.tolist())
             self.speed.extend((result.episode_distance / seconds).tolist())
             self.fell.extend(result.episode_fell.float().tolist())
+        for name, value in (getattr(result, "stats", None) or {}).items():
+            self.extra.setdefault(name, []).append(float(value))
 
     def scalars(self) -> dict[str, float]:
         """This rollout's rollout/, episode/ and reward/ scalars; starts a new rollout."""
@@ -85,5 +88,6 @@ class RolloutLog:
             out["episode/distance_m"] = float(np.mean(self.distance))
             out["episode/speed_mps"] = float(np.mean(self.speed))
             out["episode/fell"] = float(np.mean(self.fell))
+        out.update({name: float(np.mean(values)) for name, values in self.extra.items()})
         self._reset()
         return out

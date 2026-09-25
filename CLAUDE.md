@@ -778,6 +778,33 @@ web/                    Vite + TypeScript + three.js frontend
   - Hand-off (WalkTask.steady): tilt < 20° and ≥ 90% height for 0.5 s
     (was 25° / 80%), Lee et al.'s FSM scaled to this robot.
   Runs: `stand12_v3`, `getup12_v3` (50M each).
+- **2026-09-25: Walking survey → push-robust walking recipe** (user: "do a
+  similar research but for the walking … while walking and getting
+  pushed"; details in Notes). Our walker already trains with more pushes
+  than most references (they use ≤ 0.5–1 m/s every 10–15 s; Isaac Lab's
+  Go1/A1 and walk-these-ways none). Physics limit (capture point): a shove
+  of Δv needs the feet to move ~Δv·√(h/g) = 0.16 m per m/s, so 3 m/s needs
+  ~0.5 m, more than a leg. Likely limits, and the changes (new defaults;
+  runs without these settings load with them off):
+  1. training shoves were per-axis U(±1): straight shoves never passed
+     1 m/s, every test shove from 1.5 m/s up was new → `push_direction`
+     "circle" (random direction, size U(0, max)), `push_interval` 2 s
+     (1–3 s, mjlab), `push_max_spin` 0.5 rad/s, and a per-robot
+     **curriculum** (`push_curriculum_max` 3.0 m/s, +0.25 per survived
+     episode, −0.25 per fall, logged as `curriculum/push_max_speed`);
+  2. episodes ended at 60° tilt / 50% height, so it never practised deep
+     recoveries → falling = tilt > ~80° (up_z < 0.17) or torso < 30%
+     height (get-up keeps 60° / 50% for its statistics);
+  3. rewards punished recovery steps → `constraint_gate_speed_error` 0.5:
+     gait, clearance, support and roll terms pause while the speed is off
+     target by > 0.5 m/s (being off speed still costs tracking, so there's
+     no point triggering it on purpose).
+  Also: the get-up hand-over triggers on the *driving* policy's own fall
+  measure (a walker allowed 80° isn't cut off at 60°), and `train_gpu.py
+  --init <run>` fine-tunes from a checkpoint of our PPO. Deferred: a phase
+  that adapts (policy-set clock frequency or ground-force feedback: the
+  ORC paper roughly halved failures vs a fixed clock), privileged critic
+  inputs, randomization/noise/latency (mostly for a real robot).
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -820,7 +847,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 133 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 137 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after
@@ -880,6 +907,26 @@ web/                    Vite + TypeScript + three.js frontend
     "frequent slippages and highly conservative postures".
   - Smith et al. 2022 (A1, code public), AFR 2024 (Go1), HoST (humanoid,
     upward assist force curriculum) for other get-up variants.
+- **Walking-under-pushes survey (2026-09-25)** (sources in the session
+  scratchpad `src/`):
+  - legged_gym: pushes *overwrite* base xy velocity U(±1) every 15 s;
+    friction U(0.5, 1.25); obs noise; termination on base contact;
+    only_positive_rewards; ~147M steps with a terrain curriculum.
+  - Isaac Lab: pushes *add* ±0.5 m/s every 10–15 s (Go1/Go2/A1: none);
+    mass ±5 kg, COM ±5 cm; Spot's clock-free GaitReward (10) only while
+    commanded or moving > 0.5 m/s; base orientation −3.
+  - MuJoCo Playground Go1 joystick: kicks as force pulses (Δv ≲ 0.95 m/s),
+    off in training by default, used for evaluation; friction 0.4–1.0,
+    masses ±10%, COM ±5 cm; ends only upside down; 200M steps staged.
+  - mjlab: pushes every 1–3 s, xy ±0.5, z ±0.4 m/s, roll/pitch ±0.52,
+    yaw ±0.78 rad/s; ends at 70°; critic sees contacts/forces; ~1B steps.
+  - Papers: Lee 2020 (per-leg phase with policy-set frequency offsets,
+    f0 1.25 Hz for disturbance rejection), RMA (no pushes; terrain instead),
+    DreamWaQ (largest survived push 0.51 → 1.12 m/s with its estimator),
+    walk-these-ways ("low footswing and wide stance… robust to shoves"),
+    PA-LOCO (force curriculum up to ±60 N), Shi 2024 (adversarial pushes on
+    5% of envs; directions matter), ORC 2024 (fixed clock + phase reward
+    beat gait-free under pushes; ground-force-fed phase halved failures).
 - **Jumping** (user asked, 2026-09-25, after the stand policy works): a
   third behavior next to Walk and Stand, triggered by a key (J) in the
   viewer: crouch, jump, land on its feet, return to the mode it was in.

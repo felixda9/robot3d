@@ -229,7 +229,9 @@ class Behaviors:
         getup = self.policies.get("getup")
         if getup is not None and self.active is not getup or self.recovering:
             task = getup.task
-            if not self.recovering and task.fell(data):
+            # Fallen by the driving policy's own measure (when its training
+            # episodes ended): don't cut in while it can still save itself.
+            if not self.recovering and self.active.task.fell(data):
                 self.recovering = True  # hand over to the get-up policy
                 self._steady_steps = 0
                 getup.reset()

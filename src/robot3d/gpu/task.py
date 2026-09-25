@@ -131,6 +131,10 @@ class BatchedWalkTask:
         else:
             calm = torch.ones_like(vx)
         is_up = (up_z > c.upright_gate).float()
+        if c.constraint_gate_speed_error > 0:
+            balanced = (torch.sqrt((vx - c.target_speed) ** 2 + vy**2) < c.constraint_gate_speed_error).float()
+        else:
+            balanced = torch.ones_like(vx)
         at_height = (height > c.height_gate * self.standing_height).float()
         if self.clock:
             should_be_down = self.desired_down(phase)
@@ -152,18 +156,18 @@ class BatchedWalkTask:
             "upright": c.upright_weight * up_z,
             "trot": c.trot_weight * trot,
             "air_time": c.air_time_weight * torch.where(landed, extra_air, torch.zeros_like(extra_air)).sum(dim=1),
-            "gait": c.gait_weight * gait,
-            "clearance": c.clearance_weight * clearance,
+            "gait": c.gait_weight * balanced * gait,
+            "clearance": c.clearance_weight * balanced * clearance,
             "turn": c.turn_weight * upright * torch.exp(-(turn_rate**2) / c.turn_sigma),
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * ((action - last_action) ** 2).sum(dim=1),
             "slip": -c.slip_weight * foot_slip,
-            "support": -c.support_weight * (feet_down.sum(dim=1) < 2).float(),
+            "support": -c.support_weight * balanced * (feet_down.sum(dim=1) < 2).float(),
             "fall": -c.fall_penalty * fell.float() * float(c.terminate_on_fall),
             "height": c.height_weight * (height / self.standing_height).clamp(0.0, 1.0),
             "pose": c.pose_weight * upright * calm * is_up * torch.exp(-(joint_offset**2).sum(dim=1) / c.pose_sigma),
             "down": -c.down_weight * fell.float(),
-            "roll": -c.roll_weight * (joint_offset[:, self.roll_motors] ** 2).sum(dim=1),
+            "roll": -c.roll_weight * balanced * (joint_offset[:, self.roll_motors] ** 2).sum(dim=1),
             "success": c.success_bonus * (succeeded.float() if succeeded is not None else torch.zeros_like(vx)),
             "joint_speed": -c.joint_speed_weight * calm * (joint_velocity**2).sum(dim=1),
             "wobble": -c.wobble_weight * calm * (angular_velocity[:, 0] ** 2 + angular_velocity[:, 1] ** 2),

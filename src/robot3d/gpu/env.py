@@ -48,6 +48,8 @@ class StepResult:
     episode_length: torch.Tensor
     episode_distance: torch.Tensor
     episode_fell: torch.Tensor
+    # Extra per-rollout averages to log (e.g. the shove curriculum's level).
+    stats: dict[str, float] | None = None
 
 
 class GpuWalkEnv:
@@ -105,6 +107,9 @@ class GpuWalkEnv:
         self.start_xy = torch.zeros((num_envs, 2), device=self.device)
         self.next_push = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # episode step of the next shove
         self.steady_steps = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # get-up task
+        c = self.task.config
+        # Each robot's current max shove (m/s): push_max_speed, or its curriculum level.
+        self.push_level = torch.full((num_envs,), c.push_max_speed, device=self.device)
         # Foot x/y and on-ground at the end of the last step (for slip, and
         # as "was down" for landings), and each foot's time in the air.
         self._feet_before: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -180,8 +185,17 @@ class GpuWalkEnv:
             # Shoves (see WalkConfig.push_interval), without a GPU->CPU sync:
             # every robot draws a kick, only those due get it.
             due = self.episode_length >= self.next_push
-            kick = (2 * torch.rand((self.num_envs, 2), generator=self.generator, device=self.device) - 1)
-            self.qvel[:, 0:2] += kick * c.push_max_speed * due[:, None]
+            if c.push_direction == "circle":
+                angle = 2 * torch.pi * torch.rand(self.num_envs, generator=self.generator, device=self.device)
+                size = torch.rand(self.num_envs, generator=self.generator, device=self.device) * self.push_level
+                kick = torch.stack([angle.cos(), angle.sin()], dim=1) * size[:, None]
+            else:
+                kick = (2 * torch.rand((self.num_envs, 2), generator=self.generator, device=self.device) - 1)
+                kick = kick * c.push_max_speed
+            self.qvel[:, 0:2] += kick * due[:, None]
+            if c.push_max_spin > 0:
+                spin = 2 * torch.rand((self.num_envs, 3), generator=self.generator, device=self.device) - 1
+                self.qvel[:, 3:6] += spin * c.push_max_spin * due[:, None]
             self.next_push = torch.where(due, self.episode_length + self._push_delays(self.num_envs), self.next_push)
         x_before = self.qpos[:, 0].clone()
         y_before = self.qpos[:, 1].clone()
@@ -221,6 +235,13 @@ class GpuWalkEnv:
         terminated = fall_ends | succeeded
         time_out = (self.episode_length >= task.max_steps) & ~terminated
         done = terminated | time_out
+        if c.push_curriculum_max > 0:
+            # Survived a whole episode: harder shoves; fell: easier (see WalkConfig).
+            step = c.push_curriculum_step
+            self.push_level = torch.where(time_out, (self.push_level + step).clamp(max=c.push_curriculum_max),
+                                          self.push_level)
+            self.push_level = torch.where(fall_ends, (self.push_level - step).clamp(min=c.push_max_speed),
+                                          self.push_level)
 
         result = StepResult(
             obs=self.observe(),
@@ -232,6 +253,7 @@ class GpuWalkEnv:
             episode_length=self.episode_length[done].clone(),
             episode_distance=self._distance(self.qpos[done, 0:2] - self.start_xy[done]),
             episode_fell=fall_ends[done].clone(),
+            stats={"curriculum/push_max_speed": self.push_level.mean()} if c.push_curriculum_max > 0 else None,
         )
         self._feet_before = feet_after
         if done.any():

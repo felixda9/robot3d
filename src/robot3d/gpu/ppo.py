@@ -213,9 +213,14 @@ def train_gpu(
     runs_dir: Path = RUNS_DIR,
     device: str = "cuda:0",
     log=print,
+    init_from: Path | None = None,
 ) -> Path:
     """Train a walking policy on the GPU. Returns the run folder. Ctrl+C
-    stops early and still saves a final checkpoint."""
+    stops early and still saves a final checkpoint.
+
+    init_from: a checkpoint (.pt of this trainer) to start from instead of a
+    fresh network: fine-tuning, e.g. with harder shoves or new reward terms.
+    Same robot and observation size; its network size and std are kept."""
     from torch.utils.tensorboard import SummaryWriter
 
     from robot3d.gpu.env import GpuWalkEnv  # Warp: only needed for training
@@ -235,6 +240,19 @@ def train_gpu(
     T, N = ppo.steps_per_env, ppo.num_envs
     net = ActorCritic(env.num_obs, env.num_actions, ppo.net_arch, ppo.init_std).to(dev)
     normalizer = ObsNormalizer(env.num_obs, ppo.clip_obs).to(dev)
+    if init_from is not None:
+        saved = torch.load(init_from, map_location=dev, weights_only=False)
+        if saved.get("format") != CHECKPOINT_FORMAT:
+            raise ValueError(f"{init_from}: not a {CHECKPOINT_FORMAT} checkpoint (can only fine-tune our PPO's)")
+        if int(saved["num_obs"]) != env.num_obs or int(saved["num_actions"]) != env.num_actions:
+            raise ValueError(f"{init_from} has {saved['num_obs']} observations / {saved['num_actions']} actions; "
+                             f"this robot and task have {env.num_obs} / {env.num_actions}")
+        if list(saved["net_arch"]) != list(ppo.net_arch):
+            raise ValueError(f"{init_from} has network {saved['net_arch']}, the config {ppo.net_arch}")
+        net.load_state_dict(saved["model"])
+        normalizer.load_state_dict(saved["normalizer"])
+        run_info["init_from"] = str(init_from)
+        write_run_info(run_dir, run_info)
     reward_scaler = RewardScaler(N, ppo.gamma, dev) if ppo.normalize_rewards else None
     optimizer = torch.optim.Adam(net.parameters(), lr=ppo.learning_rate)
     lr = ppo.learning_rate

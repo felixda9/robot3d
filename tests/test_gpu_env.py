@@ -121,6 +121,48 @@ def test_getup_episodes_end_when_standing_steady_on_the_gpu():
     assert not result.episode_fell.any()  # success isn't counted as a fall
 
 
+def test_shove_curriculum_on_the_gpu():
+    from robot3d.gpu.env import GpuWalkEnv
+    from robot3d.walk import WalkConfig
+
+    config = WalkConfig(episode_seconds=0.4, push_interval=10.0, push_max_speed=1.0,
+                        push_curriculum_max=3.0, push_curriculum_step=0.5)
+    env = GpuWalkEnv(num_envs=64, config=config, device="cuda:0", seed=4)
+    env.reset(randomize_episode_start=False)
+    assert torch.allclose(env.push_level, torch.full_like(env.push_level, 1.0))
+    still = torch.zeros((env.num_envs, env.num_actions), device=env.device)
+    for _ in range(env.task.max_steps):  # one short episode, no shoves (interval 10 s): all survive
+        result = env.step(still)
+    assert result.time_out.all() and torch.allclose(env.push_level, torch.full_like(env.push_level, 1.5))
+    assert result.stats["curriculum/push_max_speed"].item() == pytest.approx(1.5)
+    env.push_level[:] = 3.0
+    for _ in range(env.task.max_steps):
+        env.step(still)
+    assert env.push_level.max().item() == pytest.approx(3.0)  # capped
+
+
+def test_fine_tuning_starts_from_the_checkpoint(tmp_path):
+    from robot3d.gpu.ppo import GpuPPOConfig, TorchPolicy, train_gpu
+    from robot3d.runs import list_checkpoints, read_run_info
+
+    def tiny(name, **kwargs):
+        return train_gpu(total_steps=256 * 24 * 2, name=name, checkpoint_every=256 * 24,
+                         ppo=GpuPPOConfig(num_envs=256), runs_dir=tmp_path, log=lambda *_: None, **kwargs)
+
+    first = list_checkpoints(tiny("a"))[-1].model_path
+    tuned_dir = tiny("b", init_from=first, seed=1)
+    assert read_run_info(tuned_dir)["init_from"] == str(first)
+    fresh_dir = tiny("c", seed=1)
+    observations = np.random.default_rng(0).normal(size=(32, TorchPolicy(first).num_obs)).astype(np.float32)
+
+    def actions(run_dir):  # (TorchPolicy.act takes one observation at a time)
+        policy = TorchPolicy(list_checkpoints(run_dir)[0].model_path)
+        return np.array([policy.act(o) for o in observations])
+
+    a_last = np.array([TorchPolicy(first).act(o) for o in observations])
+    assert np.abs(actions(tuned_dir) - a_last).mean() < np.abs(actions(fresh_dir) - a_last).mean()  # b started from a
+
+
 def test_tiny_rsl_training_run_plays_in_cpu_mujoco(tmp_path):
     from robot3d.gpu.rsl import RslConfig, train_rsl
     from robot3d.policy import PolicyController
