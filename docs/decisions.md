@@ -933,3 +933,11 @@ CLAUDE.md keeps the current state and the lessons; this file keeps the why.
   contact normal more than 60° from vertical. On the GPU it comes from MuJoCo
   Warp's contact list (geom, frame, worldid, nacon), scattered to (world,
   foot) without a CPU sync. `terrain12_stumble`: terrain12 + this, 100M.
+- **terrain12_stumble result** (terrain12 + stumble 0.5 per foot, 100M):
+  the back feet stopped catching (highest lift 9–14 cm, was 6–8; riser
+  contacts 2–30 control steps, was 124–273). But climbing got **worse**:
+  stairs 7–8 cm 1/6 (was 4/6), still 0/6 from 8 cm; slopes 17.5–20° 2/6
+  (was 6/6); test course 4/6 (lost the 9 cm step). It now hesitates in
+  front of steps, its front feet tapping the riser: the penalty taught it
+  that touching an edge costs, so it stopped approaching them.
+  **terrain12 stays the best terrain walker.**
