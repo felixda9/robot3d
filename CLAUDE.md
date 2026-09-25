@@ -100,7 +100,8 @@ runs/<name>/       training output (gitignored): run.json, tb/, checkpoints/
 - **One milestone (or step) at a time**; at the end explain how to test it,
   then **wait for the user**. **Ask** about significant or ambiguous choices.
 - Commit after each working step and push to `origin`
-  (https://github.com/felixda9/robot3d.git).
+  (https://github.com/felixda9/robot3d.git). **No `Co-Authored-By` or other
+  AI attribution lines in commit messages** (the user's choice; the repo is public).
 - **Restart the backend** (`uv run scripts/serve.py`) whenever the protocol or
   `WalkConfig` fields change, right away: an old server can't read new runs
   ("uses task settings this code doesn't know") and a new page can't talk to

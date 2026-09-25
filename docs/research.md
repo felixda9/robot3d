@@ -26,8 +26,7 @@ What other projects and papers do, gathered by research agents from primary sour
     - all worlds converged; solver ~1.2–2.9 iterations.
     - For comparison, CPU training runs ~50k physics steps/s effective
       (5k env steps/s × 10 substeps).
-- **Open-source survey (2026-09-25), how others train standing and getting up**
-  (sources saved in the session scratchpad `research/`):
+- **Open-source survey (2026-09-25), how others train standing and getting up:**
   - MuJoCo Playground Go1 getup (`go1/getup.py`): relative actions
     (q + 0.5a), Kp 35; 60% drops from 0.5 m with random orientation and
     joints, 40% home; 0.5 s settle; 6 s episodes, no early end; reward
@@ -56,8 +55,7 @@ What other projects and papers do, gathered by research agents from primary sour
     "frequent slippages and highly conservative postures".
   - Smith et al. 2022 (A1, code public), AFR 2024 (Go1), HoST (humanoid,
     upward assist force curriculum) for other get-up variants.
-- **Walking-under-pushes survey (2026-09-25)** (sources in the session
-  scratchpad `src/`):
+- **Walking-under-pushes survey (2026-09-25):**
   - legged_gym: pushes *overwrite* base xy velocity U(±1) every 15 s;
     friction U(0.5, 1.25); obs noise; termination on base contact;
     only_positive_rewards; ~147M steps with a terrain curriculum.

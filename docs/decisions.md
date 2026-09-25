@@ -516,7 +516,7 @@ CLAUDE.md keeps the current state and the lessons; this file keeps the why.
   50M 0.39 m/s, feet down 56%, diagonal sync 0.96, 1.58 steps/s,
   straight (0.1 °/s). Roll: 0–8° held out, 3–4° swing (walk12_straight:
   16–19°, 6–9°); slightly asymmetric still (left legs 6–8° out, rear
-  hips differ). **Shove survival** (scratchpad push_survival.py: walk 3 s,
+  hips differ). **Shove survival** (walk 3 s,
   one shove from each of 16 directions, still up 3 s later):
   | shove (m/s) | 0.5 | 1.0 | 1.5 | 2.0 | 2.5 | 3.0 |
   | trot_clock_15 (8 motors, never shoved) | 100% | 81% | 31% | 12% | 0% | 0% |
@@ -743,7 +743,7 @@ CLAUDE.md keeps the current state and the lessons; this file keeps the why.
   left 0.3 → 0.05 sideways (+0.19 forward); turn left 0.8 → 0.54 rad/s;
   forward + turn right → 0.37, −0.42. Turning and forward come first;
   stopping/back/sideways not yet (the walk12_robust start walks forward
-  regardless). Check again at 40M and 80M (scratchpad command_probe.py).
+  regardless). Check again at 40M and 80M.
 - **2026-09-25: Higher jumps → 20 N·m motors on quadruped12** (user: "I want
   the jump to be higher, right now it's pretty bugged and not high"):
   - "bugged": jump12 from walking did nothing (torso +0–1 cm, 0–40 ms in
