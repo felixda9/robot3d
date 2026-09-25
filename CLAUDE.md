@@ -171,7 +171,7 @@ web/                    Vite + TypeScript + three.js frontend
      needs terrain in training, M7), and **getup** (after a fall, in either
      mode, until standing steady; user's original choice of a separate
      get-up policy, like ANYmal's recovery controller).
-  4. [ ] **Jump on command** (user's choice, 2026-09-25): press J in the
+  4. [x] **Jump on command** (user's choice, 2026-09-25): press J in the
      viewer; a jump policy crouches, jumps as high as it can, lands on its
      feet, settles, then hands back to the Stand/Walk policy (like get-up).
 - [ ] **6. Robot designer:** (postponed by the user, 2026-09-25: "don't make
@@ -929,6 +929,17 @@ web/                    Vite + TypeScript + three.js frontend
     applies it. `humanoid_walk` training (100M steps).
 - **2026-09-25: Jump skill test**: 8 jumps from standing, passed if landed
   (≥ 60 ms airborne) and steady within 3 s; reports the median height.
+- **2026-09-25: `jump12` result** (50M steps): jump test 8/8 landed and
+  steady, median torso rise 14 cm (11 cm at 15M). In the viewer's chain
+  (stand12_push + getup12_v3 + jump12): three jumps in a row, 12–13 cm,
+  each done after ~0.9 s, back to standing level at 0.26 m, no falls.
+- **2026-09-25: `steer12` at 15M steps** (the user tried it: "walks forward
+  even when I'm not pressing W"): partly learned. Command → measured:
+  stand still → 0.17 m/s forward; forward 0.5 → 0.39; back 0.3 → +0.05;
+  left 0.3 → 0.05 sideways (+0.19 forward); turn left 0.8 → 0.54 rad/s;
+  forward + turn right → 0.37, −0.42. Turning and forward come first;
+  stopping/back/sideways not yet (the walk12_robust start walks forward
+  regardless). Check again at 40M and 80M (scratchpad command_probe.py).
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
