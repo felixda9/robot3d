@@ -449,39 +449,56 @@ def skill_test(checkpoint: Checkpoint) -> dict:
                           "up within 10 s"}
 
 
-COURSE_TEST_TRIES = 4
+COURSE_TEST_TRIES = 2  # per section
 COURSE_TEST_SPEED = 0.4  # m/s forward command
-COURSE_TEST_SECONDS = 90.0
 
 
 def course_test(checkpoint: Checkpoint, config: WalkConfig) -> dict:
-    """The skill test of terrain runs: walk the held-out test course
-    (Terrain.course: shapes the training park never has), steered along its
-    lane like a person with a gamepad would: forward at COURSE_TEST_SPEED,
-    turning back toward the lane's center line. Skill = the share of the
-    course walked before falling or running out of time, averaged over
-    COURSE_TEST_TRIES tries (different small start noise)."""
+    """The skill test of terrain runs: the held-out test course
+    (Terrain.course: six sections of shapes the training park never has).
+    Each section is tried on its own, COURSE_TEST_TRIES times: start on the
+    floor 1 m before it, walk forward at COURSE_TEST_SPEED steered back toward
+    the lane's center line (like a person with a gamepad); passed if it gets
+    0.5 m past the section's end without falling, within twice the time
+    that takes. Skill = the share of tries passed."""
     from robot3d.envs import WalkEnv
 
     course = Terrain.course()
     env = WalkEnv(checkpoint.run_info()["robot"], dataclasses.replace(config, terrain="course"), terrain=course)
     controller = PolicyController(checkpoint, env.model, course)
+    passed, failed = 0, []
+    for name, start, end in course.sections:
+        ok = 0
+        for k in range(COURSE_TEST_TRIES):
+            ok += walk_course(env, controller, start - 1.0, end + 0.5, seed=k)
+        passed += ok
+        if ok < COURSE_TEST_TRIES:
+            failed.append(f"{name} {ok}/{COURSE_TEST_TRIES}")
+    total = len(course.sections) * COURSE_TEST_TRIES
+    return {"skill": passed / total,
+            "skill_test": f"{SKILL_TEST_VERSION}: test course, {len(course.sections)} unseen sections x "
+                          f"{COURSE_TEST_TRIES} tries; " + ("missed: " + ", ".join(failed) if failed else "all passed")}
+
+
+def walk_course(env, controller: PolicyController, x0: float, x1: float, seed: int = 0) -> bool:
+    """Start at (x0, 0) facing +x and walk to x1 along the course lane (y = 0),
+    steered like course_test does: turning and stepping sideways back toward
+    the center line. True if it got there upright in time."""
     task, data = env.task, env.data
-    shares = []
-    for k in range(COURSE_TEST_TRIES):
-        env.reset(seed=k)
-        controller.reset()
-        for _ in range(round(COURSE_TEST_SECONDS / task.control_dt)):
-            if controller.steerable:
-                c, s = task.heading_cos_sin(data)
-                aim = math.atan2(-data.qpos[1], 1.0)  # back toward y = 0, within ~1 m
-                error = math.atan2(math.sin(aim - math.atan2(s, c)), math.cos(aim - math.atan2(s, c)))
-                command = [COURSE_TEST_SPEED, 0.0, float(np.clip(2.0 * error, -0.8, 0.8))]
-                controller.command = env._command = task.clamp_command(command)
-            env.step(controller.action(data))
-            if task.fell(data) or data.qpos[0] > course.length:
-                break
-        shares.append(min(max(data.qpos[0], 0.0) / course.length, 1.0))
-    return {"skill": float(np.mean(shares)),
-            "skill_test": f"{SKILL_TEST_VERSION}: test course ({course.length:.0f} m of unseen terrain), "
-                          f"share walked ({COURSE_TEST_TRIES} tries)"}
+    env.reset(seed=seed, options={"spawn": (x0, 0.0, 0.0)})
+    controller.reset()
+    for _ in range(round(2 * (x1 - x0) / COURSE_TEST_SPEED / task.control_dt)):
+        if controller.steerable:
+            c, s = task.heading_cos_sin(data)
+            aim = math.atan2(-data.qpos[1], 1.0)  # back toward y = 0, within ~1 m
+            error = math.remainder(aim - math.atan2(s, c), 2 * math.pi)
+            # ... and sideways back toward it: the (0, -y) way back, in its own frame (left = +)
+            left = -data.qpos[1] * c
+            command = [COURSE_TEST_SPEED, float(np.clip(1.5 * left, -0.3, 0.3)), float(np.clip(2.0 * error, -0.8, 0.8))]
+            controller.command = env._command = task.clamp_command(command)
+        env.step(controller.action(data))
+        if task.fell(data):
+            return False
+        if data.qpos[0] > x1:
+            return True
+    return False

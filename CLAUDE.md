@@ -142,7 +142,7 @@ their saved settings (`WalkConfig.from_run`), so old runs replay as trained.
 |---|---|---|---|
 | walk | `WalkConfig()` | `walk12_robust` | 0.39 m/s trot-walk, 1.5 Hz gait clock; survives 3 m/s shoves 87% (20 N·m) |
 | steer | `.steer()` | `steer12_m20` | forward 0.46 of 0.5, back 0.20 of 0.3, sideways 0.12 of 0.3 m/s (weak), turn 0.82 of 0.8 rad/s; zero = stand |
-| steer on terrain | `.steer().on_terrain()` | `terrain12` (training) | skill = share of the held-out test course walked |
+| steer on terrain | `.steer().on_terrain()` | `terrain12` (training) | test course at 25M: 4/6 sections (not the 9 cm step, 6 cm narrow stairs); flat steer12_m20: 2/6 |
 | stand | `.stand()` | `stand12_push` | as still as the bare motors in the home pose, all feet down; viewer pushes 8/8 at 80 N |
 | getup | `.getup()` | `getup12_v3` | up from every tested fallen pose (upside down with legs anywhere), ~1.1 s |
 | jump | `.jump()` | `jump12_m20` | torso +16–17 cm, feet up 21 cm; mid-walk +12–21 cm; landing tilt up to 30° |
@@ -169,7 +169,8 @@ Key recipe facts (details and numbers in `docs/decisions.md`):
   starts a jump; steering keys drive a steerable walker.
 - Dashboard "best" = highest **skill test** (v3): walk/stand 32 viewer-style
   pushes (72/144 N); getup 24 hard fallen starts; jump 8 jumps (+ height);
-  terrain runs: the share of the test course walked (steered along it).
+  terrain runs: the share of the test course's 6 unseen sections passed
+  (each tried twice on its own, steered along the lane).
 
 ## Lessons (each cost a training run)
 

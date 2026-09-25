@@ -886,11 +886,25 @@ CLAUDE.md keeps the current state and the lessons; this file keeps the why.
   network, new task). Loading a terrain-trained policy while on flat floor
   switches to the park. The park starts 1.5 m ahead of the origin, levels
   along +x, so walking forward means harder ground.
-- **Skill test for terrain runs:** the test course (~20 m: turned rubble,
-  12°/20° ramps with a plateau, a 9 cm step, 6 cm narrow-tread stairs, a
-  stepping field, a 10° cross-slope). A pilot steers forward at 0.4 m/s back
-  toward the lane's center line; skill = the share walked before falling
-  (4 tries, 90 s max).
+- **Skill test for terrain runs:** the test course, 25 m, six sections
+  with 1.5 m of floor before each: turned rubble, 12°/20° ramps with a
+  plateau, a 9 cm step, 6 cm narrow-tread (22 cm) stairs, a stepping field,
+  a 10° cross-slope.
+  - Each section is tried twice on its own: start 1 m before it; a pilot
+    steers at 0.4 m/s, turning and stepping sideways back to the center
+    line. Passed = 0.5 m past its end upright, within twice the time that
+    takes. Skill = the share passed; the description lists what it missed.
+  - The first version scored the share of the whole course walked. Both
+    walkers stopped at the 9 cm step, so nothing after it was ever tested.
+  - Cross-slope: a sideways-tilted face can't meet a level ramp edge
+    everywhere, so off the center line the junctions have lips. A rear foot
+    caught on a 3.5 cm lip stalled terrain12. Its test starts on the slope.
+    With a heading-only pilot the robot also drifted 0.6 m downhill; the
+    pilot now corrects sideways too.
+  - Results so far: steer12_m20 (flat, no map) 33%: ramps and cross-slope
+    only. terrain12 at 25M: 67%: also rubble and the stepping field; not yet
+    the 9 cm step or the narrow stairs (its curriculum is around level 2–3,
+    with 3–5 cm steps).
 - jump12_m20 (20 N·m, running starts, 50M): from standing +16–17 cm, 0.3 s
   airborne, feet up to 21–22 cm, landing tilt 24–30°; while walking +12–21
   cm, sometimes with a small second hop.

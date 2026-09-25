@@ -53,7 +53,10 @@ class WalkEnv(gym.Env):
         super().reset(seed=seed)  # seeds self.np_random
         if self.task.randomizes_physics:
             self.task.apply_physics(self.model, *self.task.sample_physics(self.np_random))
-        spawn = self.terrain.random_spawn(self.np_random) if self.terrain is not None and self.terrain.tiles else None
+        # options={"spawn": (x, y, heading)}: start there (e.g. a test course section)
+        spawn = (options or {}).get("spawn")
+        if spawn is None and self.terrain is not None and self.terrain.tiles:
+            spawn = self.terrain.random_spawn(self.np_random)
         self.task.reset_state(self.data, self.np_random, spawn=spawn)
         self._last_action = np.zeros(self.task.num_actions)
         self._steps = 0

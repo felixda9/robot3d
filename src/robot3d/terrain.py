@@ -20,10 +20,10 @@ never the same twice, so a policy can't memorize it.
       - "park": one tile per level and type, levels along +x (the robot
         starts on flat floor and walks forward into harder ground), types
         side by side along y;
-      - "course" (testing): a lane along +x of shapes the park never has
-        (turned rubble, a single tall step, long ramps, narrow-tread stairs,
-        a stepping field, a cross-slope). How far a policy gets along it
-        measures how well it generalizes.
+      - "course" (testing): a lane along +x of six sections of shapes the
+        park never has (turned rubble, long ramps, a single tall step,
+        narrow-tread stairs, a stepping field, a cross-slope). Which of them
+        a policy gets across measures how well it generalizes.
 
 Everything is boxes (primitive shapes, like the robots), added to a robot's
 model when it's loaded (robots.load_model(robot, terrain=...)), so robot
@@ -283,51 +283,75 @@ class Terrain:
 
     @classmethod
     def course(cls, seed: int = 0) -> "Terrain":
-        """The test course: a 1.6 m lane along +x from x = 1.5 m with shapes the park never has."""
+        """The test course: a 1.6 m lane along +x with six sections of shapes
+        the park never has, 1.5 m of flat floor before each, so each can be
+        tried on its own (policy.course_test). `sections`: (name, start x, end
+        x); a test starts 1 m before start and passes 0.5 m after end."""
         rng = np.random.default_rng(seed + 1000)
-        boxes = []
+        boxes: list[Box] = []
+        sections: list[tuple[str, float, float]] = []
         half_w = 0.8
-        x = 1.5
-        # 1. Turned rubble: slabs at random angles (the park's are axis-aligned), 3 m.
+        x = 0.0
+
+        def section(name: str, length: float) -> float:
+            """Start a section after 1.5 m of floor; returns its start x."""
+            nonlocal x
+            start = x + 1.5
+            sections.append((name, start, start + length))
+            x = start + length
+            return start
+
+        # 1. Turned rubble: slabs at random angles (the park's are axis-aligned).
+        s = section("turned rubble", 3.0)
         for _ in range(30):
             h = rng.uniform(0.01, 0.05)
-            boxes.append(Box((x + rng.uniform(0.2, 2.8), rng.uniform(-0.7, 0.7), h / 2),
+            boxes.append(Box((s + rng.uniform(0.2, 2.8), rng.uniform(-0.7, 0.7), h / 2),
                              (rng.uniform(0.05, 0.2), rng.uniform(0.05, 0.2), h / 2), yaw=rng.uniform(0, math.pi)))
-        x += 3.0
         # 2. A long ramp up at 12 deg, a 1 m plateau, a steeper one down at 20 deg.
         rise = 0.25
         up, down = rise / math.tan(math.radians(12)), rise / math.tan(math.radians(20))
-        boxes.append(_ramp(x, x + up, 0.0, rise, half_w))
-        boxes.append(Box((x + up + 0.5, 0.0, rise / 2), (0.5, half_w, rise / 2)))
-        boxes.append(_ramp(x + up + 1.0, x + up + 1.0 + down, rise, 0.0, half_w))
-        x += up + 1.0 + down + 0.5
+        s = section("ramps 12/20 deg", up + 1.0 + down)
+        boxes.append(_ramp(s, s + up, 0.0, rise, half_w))
+        boxes.append(Box((s + up + 0.5, 0.0, rise / 2), (0.5, half_w, rise / 2)))
+        boxes.append(_ramp(s + up + 1.0, s + up + 1.0 + down, rise, 0.0, half_w))
         # 3. One tall step (9 cm) up and, 1 m later, down.
-        boxes.append(Box((x + 1.0, 0.0, 0.045), (0.5, half_w, 0.045)))
-        x += 2.0
+        s = section("9 cm step", 1.0)
+        boxes.append(Box((s + 0.5, 0.0, 0.045), (0.5, half_w, 0.045)))
         # 4. Narrow stairs: 6 steps of 6 cm on 22 cm treads up, a landing, 6 down.
         tread, step, n = 0.22, 0.06, 6
+        s = section("narrow stairs", 2 * n * tread + 0.8)
         for k in range(n):
             h = step * (k + 1)
-            boxes.append(Box((x + (k + 0.5) * tread, 0.0, h / 2), (tread / 2, half_w, h / 2)))
-        top = x + n * tread
+            boxes.append(Box((s + (k + 0.5) * tread, 0.0, h / 2), (tread / 2, half_w, h / 2)))
+        top = s + n * tread
         boxes.append(Box((top + 0.4, 0.0, step * n / 2), (0.4, half_w, step * n / 2)))
         for k in range(n):
             h = step * (n - k)
             boxes.append(Box((top + 0.8 + (k + 0.5) * tread, 0.0, h / 2), (tread / 2, half_w, h / 2)))
-        x = top + 0.8 + n * tread + 0.5
-        # 5. Stepping field: 25 cm blocks, each 0-7 cm high, 3 m.
+        # 5. Stepping field: 25 cm blocks, each 0-7 cm high.
+        s = section("stepping field", 3.0)
         for i in range(12):
             for j in range(6):
                 h = rng.uniform(0.0, 0.07)
                 if h > 0.005:
-                    boxes.append(Box((x + (i + 0.5) * 0.25, -0.75 + (j + 0.5) * 0.25, h / 2), (0.125, 0.125, h / 2)))
-        x += 3.0
-        # 6. Cross-slope: the lane tilted 10 deg sideways (left side up), 3 m.
+                    boxes.append(Box((s + (i + 0.5) * 0.25, -0.75 + (j + 0.5) * 0.25, h / 2), (0.125, 0.125, h / 2)))
+        # 6. Cross-slope: the lane tilted 10 deg sideways (left side up) for 3 m,
+        # raised so its center line is level with the 10 deg ramps up and down
+        # to it (at the lane's edges, the ramps meet it 14 cm off).
         tilt = math.radians(10)
-        boxes.append(Box.with_top((x + 1.5, 0.0, half_w * math.tan(tilt)), (1.5, half_w / math.cos(tilt)), 0.06,
-                                  roll=tilt))
-        x += 3.0
+        lift = half_w * math.tan(tilt) + 0.01  # center height: the low edge just above the floor
+        ramp = lift / math.tan(tilt)
+        s = section("10 deg cross-slope", 2 * ramp + 3.0)
+        boxes.append(_ramp(s, s + ramp, 0.0, lift, half_w))
+        boxes.append(Box.with_top((s + ramp + 1.5, 0.0, lift), (1.5, half_w / math.cos(tilt)), 0.3, roll=tilt))
+        boxes.append(_ramp(s + ramp + 3.0, s + 2 * ramp + 3.0, lift, 0.0, half_w))
+        # Its test starts on the slope (0.3 m in) and ends 0.5 m before its end:
+        # off the center line, the junctions with the flat ramps have lips (a
+        # sideways-tilted face can't meet a level edge everywhere), and a rear
+        # foot caught on one isn't what this section tests.
+        sections[-1] = (sections[-1][0], s + ramp + 1.3, s + ramp + 2.0)
         terrain = cls("course", boxes)
+        terrain.sections = sections
         terrain.length = x
         return terrain
 
