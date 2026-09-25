@@ -222,6 +222,12 @@ class WalkConfig:
     # (0 everywhere on flat ground), like the height scan of legged_gym/ANYmal.
     height_map: bool = False
     height_map_noise: float = 0.0  # m: uniform noise per point and step (a real map is never exact)
+    # Penalty per foot pushing against a steep face (a stair riser, a block's
+    # side): touching the ground with a contact normal more than 60 deg from
+    # vertical (legged_gym's feet_stumble). terrain12 lifted its front feet
+    # 11-16 cm but its back feet only 6-8, and got stuck with them against
+    # 9 cm steps: nothing else says "that foot is caught, lift it".
+    stumble_weight: float = 0.0
 
     # --- physics randomization, drawn per robot and episode (off at the
     # defaults): no two robots alike, so the policy can't rely on exact
@@ -287,6 +293,7 @@ class WalkConfig:
             terrain="park",
             height_map=True,
             height_map_noise=0.02,
+            stumble_weight=0.5,
             friction_min=0.4,  # icy-ish to grippy rubber (legged_gym: 0.5-1.25)
             friction_max=1.25,
             added_mass_min=-0.5,  # 6.6 kg robot: -8% to +23%
@@ -732,6 +739,7 @@ class WalkTask:
         jump_airborne: bool = False,
         jump_landed: bool = False,
         command: np.ndarray | None = None,
+        stumbling: np.ndarray | None = None,
     ) -> tuple[float, dict[str, float]]:
         """Reward for one control step, plus each term separately (for logging).
 
@@ -747,6 +755,7 @@ class WalkTask:
             had been in the air (see air_time_update()).
         foot_height: each foot's lowest point above the floor, m (foot_heights()).
         phase: the gait clock at the end of the step (gait_phase()).
+        stumbling: which feet push against a steep face (stumbling_feet()).
         """
         c = self.config
         command = self.default_command() if command is None else command
@@ -800,6 +809,7 @@ class WalkTask:
             "rejump": -c.rejump_weight * float(jump_airborne and jump_landed),
             "settle": c.settle_weight * float(jump_landed) * float(np.mean(feet_down))
             * math.exp(-float(np.sum(joint_offset**2)) / 0.5),
+            "stumble": -c.stumble_weight * (float(np.sum(stumbling)) if stumbling is not None else 0.0),
         }
         total = float(sum(terms.values()))
         return (max(total, 0.0) if c.reward_floor else total), terms
@@ -851,6 +861,30 @@ class WalkTask:
         """(x/y position of each foot, whether each foot is on the ground)."""
         pos = data.geom_xpos[self.feet]
         return pos[:, :2].copy(), self.foot_heights(data) < self.FOOT_CONTACT_MARGIN
+
+    STUMBLE_NORMAL_Z = 0.5  # |contact normal z| below this (> 60 deg from vertical): a steep face
+
+    @cached_property
+    def _foot_of_geom(self) -> np.ndarray:
+        """Per geom: which foot (index into self.feet) it is, or -1."""
+        index = np.full(self.model.ngeom, -1)
+        index[self.feet] = np.arange(len(self.feet))
+        return index
+
+    def stumbling_feet(self, data: mujoco.MjData) -> np.ndarray:
+        """Per foot: touching the static world (floor, terrain) with a contact
+        normal steeper than STUMBLE_NORMAL_Z, i.e. pushing against a riser or
+        the side of a block rather than standing on top (the contacts of the
+        last physics step)."""
+        out = np.zeros(len(self.feet), dtype=bool)
+        m, foot_of = self.model, self._foot_of_geom
+        for i in range(data.ncon):
+            contact = data.contact[i]
+            g0, g1 = contact.geom
+            foot, other = (g0, g1) if foot_of[g0] >= 0 else (g1, g0)
+            if foot_of[foot] >= 0 and m.geom_bodyid[other] == 0 and abs(contact.frame[2]) < self.STUMBLE_NORMAL_Z:
+                out[foot_of[foot]] = True
+        return out
 
     def foot_heights(self, data: mujoco.MjData) -> np.ndarray:
         """Each foot's lowest point above the ground under it (m; ~0 when planted)."""

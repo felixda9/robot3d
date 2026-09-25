@@ -206,3 +206,47 @@ def test_terrain_runs_are_tested_on_the_course(tiny_terrain_run):
     assert "test course" in result["skill_test"] and 0.0 <= result["skill"] <= 1.0
     episodes = evaluate(checkpoint, episodes=1)
     assert episodes[0]["seconds"] > 0
+
+
+def _feet_against_the_first_step(env) -> list[bool]:
+    """Put env's robot at the foot of its stairs tile, the front foot that
+    reaches furthest pressed 2 mm into the first riser. Returns which feet
+    touch the riser."""
+    tile = env.terrain.tiles[0][0]
+    env.task.reset_state(env.data, np.random.default_rng(0), spawn=(-1.6, 0.0, 0.0))
+    riser = -tile.boxes[0].half[0]
+    reach = env.data.geom_xpos[env.task.feet, 0] + env.task.foot_radius
+    env.data.qpos[0] += riser - reach.max() + 0.002
+    mujoco.mj_forward(env.model, env.data)
+    reach = env.data.geom_xpos[env.task.feet, 0] + env.task.foot_radius
+    return (reach > riser).tolist()
+
+
+def test_stumbling_feet_are_feet_against_a_riser():
+    tile = make_tile("stairs", 7, np.random.default_rng(0))
+    env = WalkEnv("quadruped12", EXACT, terrain=Terrain.single(tile))
+    env.reset(seed=0, options={"spawn": (-1.6, 0.0, 0.0)})
+    assert not env.task.stumbling_feet(env.data).any()  # standing on the floor: normals point up
+    touching = _feet_against_the_first_step(env)
+    assert sum(touching) >= 1 and not any(touching[2:])  # a front foot, not the back ones
+    assert env.task.stumbling_feet(env.data).tolist() == touching
+
+
+@gpu
+def test_stumbling_feet_on_the_gpu(terrain_gpu_env):
+    import mujoco_warp as mjw
+    import warp as wp
+    from test_gpu_env import put_cpu_state_into_world  # (pytest puts tests/ on sys.path)
+
+    env = terrain_gpu_env
+    env.reset()
+    world = int(np.nonzero([env.tiles[t].kind == "stairs" for t in env.task.tile.tolist()])[0][0])
+    cpu = WalkEnv("quadruped12", EXACT, terrain=Terrain.single(env.tiles[env.task.tile[world].item()]))
+    cpu.reset(seed=0)
+    touching = _feet_against_the_first_step(cpu)
+    put_cpu_state_into_world(env, world, cpu)
+    with wp.ScopedDevice(env.wp_device), wp.ScopedStream(wp.stream_from_torch(env.device)):
+        mjw.collision(env.m, env.d)  # the contact list for this state
+    stumbling = env.task.stumbling_feet(env.contact_geom, env.contact_frame, env.contact_world, env.nacon,
+                                        env.num_envs)
+    assert stumbling[world].tolist() == cpu.task.stumbling_feet(cpu.data).tolist() == touching

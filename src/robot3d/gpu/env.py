@@ -123,6 +123,11 @@ class GpuWalkEnv:
         self.xfrc = wp.to_torch(d.xfrc_applied)  # (N, nbody, 6) external force + torque (force pushes)
         self.geom_xpos = wp.to_torch(d.geom_xpos)  # (N, ngeom, 3)
         self.power = wp.to_torch(self._power)  # (N,)
+        # The contact list of the last physics step (all worlds together), for stumbling feet.
+        self.contact_geom = wp.to_torch(d.contact.geom)  # (C, 2)
+        self.contact_frame = wp.to_torch(d.contact.frame)  # (C, 3, 3): row 0 = the normal
+        self.contact_world = wp.to_torch(d.contact.worldid)  # (C,)
+        self.nacon = wp.to_torch(d.nacon)  # (1,) contacts in use
         self.reset_mask = wp.to_torch(self._reset_mask)  # (N,)
 
         self.generator = torch.Generator(device=self.device).manual_seed(seed)
@@ -336,6 +341,8 @@ class GpuWalkEnv:
             joint_offset=self.qpos[:, task.joint_qpos] - task.home_ctrl,
             joint_velocity=self.qvel[:, task.joint_qvel], angular_velocity=self.qvel[:, 3:6],
             succeeded=succeeded, jump_airborne=airborne, jump_landed=self.landed, command=self.command,
+            stumbling=(task.stumbling_feet(self.contact_geom, self.contact_frame, self.contact_world, self.nacon,
+                                           self.num_envs) if c.stumble_weight > 0 else None),
         )
         self.last_action = actions
         self.episode_length += 1

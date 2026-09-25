@@ -142,7 +142,7 @@ their saved settings (`WalkConfig.from_run`), so old runs replay as trained.
 |---|---|---|---|
 | walk | `WalkConfig()` | `walk12_robust` | 0.39 m/s trot-walk, 1.5 Hz gait clock; survives 3 m/s shoves 87% (20 N·m) |
 | steer | `.steer()` | `steer12_m20` | forward 0.46 of 0.5, back 0.20 of 0.3, sideways 0.12 of 0.3 m/s (weak), turn 0.82 of 0.8 rad/s; zero = stand |
-| steer on terrain | `.steer().on_terrain()` | `terrain12` (training) | test course at 25M: 4/6 sections (not the 9 cm step, 6 cm narrow stairs); flat steer12_m20: 2/6 |
+| steer on terrain | `.steer().on_terrain()` | `terrain12`; `terrain12_stumble` training | test course 5/6 (not the narrow 6 cm stairs; flat steer12_m20: 2/6); down any level; climbs steps ≤ 7–8 cm, slopes ≤ 20°; back feet catch on higher steps |
 | stand | `.stand()` | `stand12_push` | as still as the bare motors in the home pose, all feet down; viewer pushes 8/8 at 80 N |
 | getup | `.getup()` | `getup12_v3` | up from every tested fallen pose (upside down with legs anywhere), ~1.1 s |
 | jump | `.jump()` | `jump12_m20` | torso +16–17 cm, feet up 21 cm; mid-walk +12–21 cm; landing tilt up to 30° |
@@ -189,11 +189,11 @@ Key recipe facts (details and numbers in `docs/decisions.md`):
 ## Current status
 
 2026-09-25:
-- **Training on the GPU:** `terrain12` (steer12_m20 fine-tuned on the park
-  with the height map and random physics, 150M steps, ~55 min).
-- **Done today:** jump12_m20, steer12_m20, humanoid_walk (see tables);
-  terrain built and tested (docs/decisions.md, "Terrain").
-- **Next:** check terrain12 on the test course and in the viewer (Ground:
-  Park / Course); then the stand policy on uneven ground, and the humanoid
-  on terrain.
-- **Tests:** 172 passing, `tsc` clean.
+- **Training on the GPU:** `terrain12_stumble` (terrain12 + a penalty for
+  feet pushing against steep faces, 100M): its back feet caught on 9 cm
+  steps.
+- **Done today:** jump12_m20, steer12_m20, humanoid_walk, terrain12 (see
+  tables); terrain built and tested (docs/decisions.md, "Terrain").
+- **Next:** check terrain12_stumble climbing and on the test course; then the
+  stand policy on uneven ground, and the humanoid on terrain.
+- **Tests:** 174 passing, `tsc` clean.

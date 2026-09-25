@@ -134,6 +134,7 @@ class WalkEnv(gym.Env):
             joint_offset=data.qpos[task.joint_qpos] - task.home_ctrl,
             joint_velocity=data.qvel[task.joint_qvel], angular_velocity=data.qvel[3:6], succeeded=succeeded,
             jump_airborne=airborne, jump_landed=self._landed, command=self._command,
+            stumbling=task.stumbling_feet(data) if c.stumble_weight > 0 else None,
         )
         self._last_action = action
         self._steps += 1

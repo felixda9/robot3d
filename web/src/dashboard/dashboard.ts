@@ -108,7 +108,7 @@ const TERM_CHARTS: TermChart[] = [
     tickFormat: fixed(2),
   },
   {
-    terms: ["energy", "smoothness", "slip", "support", "roll", "fall", "down"],
+    terms: ["energy", "smoothness", "slip", "support", "roll", "stumble", "fall", "down"],
     title: "Penalties (−)",
     subtitle: "What the selected run is penalized for, average per step. Closer to 0 is better.",
     format: fixed(3),

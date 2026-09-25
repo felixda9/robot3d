@@ -60,6 +60,10 @@ class BatchedWalkTask:
         # in both directions; each robot's tile index (N,), or None (flat floor).
         self.grids = tensor(np.stack([t.heights for t in tiles])) if tiles else None
         self.tile: torch.Tensor | None = None
+        # For stumbling_feet: per geom, its foot index (-1: not a foot) and
+        # whether it's part of the static world (body 0).
+        self.foot_of_geom = tensor(task._foot_of_geom, torch.long)
+        self.world_geom = tensor(task.model.geom_bodyid == 0, torch.bool)
 
     # ----------------------------------------------------------------- actions
 
@@ -228,6 +232,7 @@ class BatchedWalkTask:
         jump_airborne: torch.Tensor | None = None,
         jump_landed: torch.Tensor | None = None,
         command: torch.Tensor | None = None,
+        stumbling: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """(N,) rewards and (N,) per-term values, same terms as WalkTask.reward.
         feet_down, landed: (N, feet) bool; air_time, foot_height: (N, feet);
@@ -299,6 +304,8 @@ class BatchedWalkTask:
         terms["rejump"] = -c.rejump_weight * up_in_air * has_landed
         terms["settle"] = (c.settle_weight * has_landed * feet_down.float().mean(dim=1)
                            * torch.exp(-(joint_offset**2).sum(dim=1) / 0.5))
+        terms["stumble"] = -c.stumble_weight * (stumbling.float().sum(dim=1) if stumbling is not None
+                                                else torch.zeros_like(vx))
         total = torch.stack(list(terms.values())).sum(dim=0)
         return (total.clamp(min=0.0) if c.reward_floor else total), terms
 
@@ -357,6 +364,25 @@ class BatchedWalkTask:
         offset = torch.stack([-local[:, 0] * reach, -local[:, 1] * reach, height * hz], dim=1)
         point = torso_pos + torch.einsum("nij,nj->ni", torso_rot, offset)
         return force, torch.cross(point - torso_com, force, dim=1)
+
+    def stumbling_feet(self, geom: torch.Tensor, frame: torch.Tensor, worldid: torch.Tensor,
+                       nacon: torch.Tensor, num_worlds: int) -> torch.Tensor:
+        """(N, feet) bool, WalkTask.stumbling_feet from MuJoCo Warp's contact
+        list (all worlds' contacts in one list: geom (C, 2), frame (C, 3, 3),
+        worldid (C,); nacon = how many are in use), without a GPU->CPU sync."""
+        valid = (torch.arange(geom.shape[0], device=geom.device) < nacon.reshape(()))
+        valid &= (geom[:, 0] >= 0) & (geom[:, 1] >= 0)  # (-1: flex, not a geom)
+        g0, g1 = geom[:, 0].clamp(min=0).long(), geom[:, 1].clamp(min=0).long()
+        f0, f1 = self.foot_of_geom[g0], self.foot_of_geom[g1]
+        foot = torch.where(f0 >= 0, f0, f1)
+        other = torch.where(f0 >= 0, g1, g0)
+        steep = frame[:, 0, 2].abs() < WalkTask.STUMBLE_NORMAL_Z
+        hit = valid & (foot >= 0) & self.world_geom[other] & steep
+        feet = len(self.task.feet)
+        index = torch.where(hit, worldid.long() * feet + foot, torch.zeros_like(foot))
+        out = torch.zeros(num_worlds * feet, device=geom.device)
+        out.scatter_reduce_(0, index, hit.float(), reduce="amax")
+        return out.view(num_worlds, feet) > 0
 
     def foot_heights(self, geom_xpos: torch.Tensor) -> torch.Tensor:
         """(N, feet) each foot's lowest point above the ground under it."""

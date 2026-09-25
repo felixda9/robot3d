@@ -912,3 +912,24 @@ CLAUDE.md keeps the current state and the lessons; this file keeps the why.
   sideways 0.18 (0.3), turn 0.84 (0.8) rad/s, stands still at zero.
 - humanoid_walk (100M): no falls in 5 x 20 s, but only 0.16 m/s (target
   0.4); push test 53% at 190/380 N.
+- **terrain12 result** (steer12_m20 fine-tuned on the park, 150M steps,
+  ~65 min):
+  - Level curriculum: rose from 1.5 to ~6 by 40M, then flat; falls ~5%;
+    shoves at the 3 m/s maximum.
+  - Test course: 83% at 150M (5/6; only the narrow 6 cm stairs missed); the
+    flat steer12_m20 gets 33%.
+  - Going down works at every level. Climbing (6 tries per level): stairs
+    up to 7–8 cm steps (level 5: 4/6, level 6+: 0/6); slopes up to 20°
+    (level 7: 6/6, level 8+: 0/6). That's why the mean level stalled at 6.
+  - Stairs: **the back feet get caught** (the user saw it in the viewer
+    too). Front feet lift 11–16 cm above the ground below, back feet only
+    6–8 cm. On 9–10 cm steps the back toes press against the riser for
+    3–5 s, then the episode times out.
+  - Steep ramps: nothing gets caught. Front feet on the ramp, back feet on
+    the floor, and it creeps up at 2 cm/s: a skill it rarely practiced,
+    since failed climbs demote it.
+- **Stumble penalty** (`stumble_weight`, on in `on_terrain()`: 0.5 per
+  foot, legged_gym's feet_stumble): a foot touching the static world with a
+  contact normal more than 60° from vertical. On the GPU it comes from MuJoCo
+  Warp's contact list (geom, frame, worldid, nacon), scattered to (world,
+  foot) without a CPU sync. `terrain12_stumble`: terrain12 + this, 100M.
