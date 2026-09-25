@@ -143,9 +143,10 @@ export interface FrameMessage {
 }
 
 /**
- * What a trained policy does. walk: walks (and with a stand policy loaded,
- * that one gets it back up after a fall, then walking resumes). stand:
- * stays upright in place, catches shoves, gets up after falls.
+ * What the robot is doing while a policy drives. walk: the walk policy.
+ * stand: the stand policy (stands still, catches shoves), or the get-up
+ * policy if that's all there is. In both, a loaded get-up policy takes over
+ * after a fall until the robot stands steady again.
  */
 export type Mode = "walk" | "stand";
 
@@ -157,11 +158,13 @@ export interface StatusMessage {
   walk_policy: string;
   /** The loaded standing policy, or "" if none. */
   stand_policy: string;
+  /** The loaded get-up policy (drives after falls), or "" if none. */
+  getup_policy: string;
   /** Which policy drives while a policy drives. */
   mode: Mode;
   /** True while a policy drives the motors; set_ctrl is refused then. */
   policy_active: boolean;
-  /** Walk mode: the robot fell and the stand policy is getting it back up. */
+  /** The robot fell and the get-up policy is getting it back up. */
   recovering: boolean;
 }
 
@@ -220,11 +223,11 @@ export interface UsePolicyCommand {
 /**
  * Load a checkpoint from the runs folder and let it drive; the robot
  * restarts standing. Names, not paths, e.g.
- * { run: "walk_10m", checkpoint: "step_009000012" }. A stand-task run goes in
- * the stand slot, anything else in the walk slot (replacing what was there),
- * and the mode switches to it. If the run was trained on another robot, the
- * server switches to that robot (forgetting the other slot) and sends every
- * browser a new SceneMessage.
+ * { run: "walk_10m", checkpoint: "step_009000012" }. It goes in the slot of
+ * its task (walk, stand or getup; replacing what was there); walk and stand
+ * policies switch the mode to theirs. If the run was trained on another
+ * robot, the server switches to that robot (forgetting the other slots) and
+ * sends every browser a new SceneMessage.
  */
 export interface LoadPolicyCommand {
   type: "load_policy";
@@ -271,7 +274,7 @@ export interface PushCommand {
   force: number;
 }
 
-/** Switch between the loaded walk and stand policies (and let the policy drive). */
+/** Switch between walking and standing (and let the policies drive). */
 export interface SetModeCommand {
   type: "set_mode";
   mode: Mode;

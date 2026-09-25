@@ -98,6 +98,25 @@ def test_random_shoves_on_the_gpu():
     assert (env.next_push >= env.episode_length).all()  # every robot has its next shove scheduled (or due next step)
 
 
+def test_getup_episodes_end_when_standing_steady_on_the_gpu():
+    from robot3d.gpu.env import GpuWalkEnv
+    from robot3d.walk import WalkConfig
+
+    env = GpuWalkEnv(num_envs=64, robot="quadruped12", config=WalkConfig.getup(), device="cuda:0", seed=2)
+    env.reset(randomize_episode_start=False)
+    assert env.task.fell(env.qpos, env.xmat[:, 1]).float().mean() > 0.6  # they start fallen
+    # Put them all on their feet: standing steady for success_seconds ends the episode with the bonus.
+    env.qpos[:] = env.task.standing_qpos
+    env.qvel[:] = 0.0
+    env.steady_steps[:] = 0
+    still = torch.zeros((env.num_envs, env.num_actions), device=env.device)
+    for step in range(env.task.task.success_steps):
+        result = env.step(still)
+        assert result.done.all().item() == (step == env.task.task.success_steps - 1), step
+    assert (result.terms["success"] == env.task.config.success_bonus).all()
+    assert not result.episode_fell.any()  # success isn't counted as a fall
+
+
 def test_tiny_rsl_training_run_plays_in_cpu_mujoco(tmp_path):
     from robot3d.gpu.rsl import RslConfig, train_rsl
     from robot3d.policy import PolicyController

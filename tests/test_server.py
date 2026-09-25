@@ -300,10 +300,10 @@ def test_watching_another_robots_policy_switches_the_robot(tiny_run12):
             assert receive_until(ws, "scene").robot == "quadruped12"
 
 
-def test_walk_and_stand_modes(tiny_run, tiny_stand_run, tmp_path):
+def test_walk_and_stand_modes(tiny_run, tiny_stand_run, tiny_getup_run, tmp_path):
     import shutil
 
-    for run in (tiny_run, tiny_stand_run):
+    for run in (tiny_run, tiny_stand_run, tiny_getup_run):
         shutil.copytree(run, tmp_path / run.name)
     with TestClient(create_app("quadruped", runs_dir=tmp_path)) as client:
         with client.websocket_connect("/ws") as ws:
@@ -327,7 +327,11 @@ def test_walk_and_stand_modes(tiny_run, tiny_stand_run, tmp_path):
             receive_until(ws, "status", lambda s: not s.policy_active)
             ws.send_json({"type": "set_mode", "mode": "walk"})  # ... picking a mode hands it back
             status = receive_until(ws, "status", lambda s: s.mode == "walk")
-            assert status.policy_active
+            assert status.policy_active and status.getup_policy == ""
+
+            load("tiny_getup")
+            status = receive_until(ws, "status", lambda s: s.getup_policy != "")
+            assert status.mode == "walk"  # loading a get-up policy keeps the mode
 
 
 def test_root_page_responds(client):

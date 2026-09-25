@@ -49,6 +49,7 @@ class WalkEnv(gym.Env):
         self._steps = 0
         self._start_xy = self.data.qpos[0:2].copy()
         self._next_push = self._push_delay()
+        self._steady_steps = 0
         self._feet_down = self.task.feet_state(self.data)[1]
         self._air_time = np.zeros(len(self.task.feet))
         return self.task.observation(self.data, self._last_action, self.task.gait_phase(0)), {}
@@ -86,6 +87,8 @@ class WalkEnv(gym.Env):
 
         up_z = task.up_z(data)
         fell = task.fell(data)
+        self._steady_steps = self._steady_steps + 1 if task.steady(data) else 0
+        succeeded = task.config.success_bonus > 0 and self._steady_steps >= task.success_steps
         reward, terms = task.reward(
             vx=vx, vy=vy, motor_power=power, action=action,
             last_action=self._last_action, up_z=up_z, fell=fell, foot_slip=foot_slip,
@@ -93,18 +96,21 @@ class WalkEnv(gym.Env):
             foot_height=task.foot_heights(data), phase=task.gait_phase(self._steps + 1),  # the clock after this step
             turn_rate=task.turn_rate(data), height=float(data.qpos[2]),
             joint_offset=data.qpos[task.joint_qpos] - task.home_ctrl,
+            joint_velocity=data.qvel[task.joint_qvel], angular_velocity=data.qvel[3:6], succeeded=succeeded,
         )
         self._last_action = action
         self._steps += 1
 
         observation = task.observation(data, self._last_action, task.gait_phase(self._steps))
-        terminated = fell and task.config.terminate_on_fall  # standing: no; it has to get up
+        # A fall ends a walk/stand episode; getting up steadily ends a get-up one.
+        terminated = (fell and task.config.terminate_on_fall) or succeeded
         truncated = self._steps >= task.max_steps
         info = {
             "forward_velocity": forward_velocity,
             "distance": task.distance(data.qpos[0:2] - self._start_xy),
             "motor_power": power,
             "fell": fell,
+            "succeeded": succeeded,
             **{f"reward_{name}": value for name, value in terms.items()},
         }
         return observation, reward, terminated, truncated, info

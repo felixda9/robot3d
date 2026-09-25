@@ -92,6 +92,7 @@ class StatusMessage(_Message):
     paused: bool
     walk_policy: str
     stand_policy: str
+    getup_policy: str
     mode: Mode
     policy_active: bool
     recovering: bool

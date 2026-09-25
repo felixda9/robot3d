@@ -162,12 +162,14 @@ web/                    Vite + TypeScript + three.js frontend
   2. [x] A 12-motor robot (a sideways hip joint per leg, like real robot
      dogs; user's choice, since the 8-motor legs can't roll it back over
      from its side), trained to walk while being shoved at random.
-  3. [ ] A **stand** policy (stays upright in place, steps to catch shoves,
-     gets back up after falls; the user asked for a stand-only mode to test
-     stability) plus an automatic switch: in Walk mode the walker drives
-     (itself trained with shoves) and the stand policy takes over after a
-     fall until the robot is up (user's choice: two policies, like ANYmal's
-     recovery controller). The viewer gets Stand / Walk modes.
+  3. [ ] Three policies with an automatic switch (Walk / Stand modes in
+     the viewer): **walk** (trained with shoves), **stand** (the user: "its
+     goal should be to not move and stay in a stable position": home pose,
+     still, back to it after a shove, try not to fall; on uneven ground
+     "stabilise itself to a point where it's not moving and is stable" →
+     needs terrain in training, M7), and **getup** (after a fall, in either
+     mode, until standing steady; user's original choice of a separate
+     get-up policy, like ANYmal's recovery controller).
 - [ ] **6. Robot designer:** simple YAML/JSON robot spec (body parts, joints,
   motors) → generated MJCF; then a visual editor in the browser.
 - [ ] **7. Environments & commands:** terrain, stairs, obstacles. Train a policy
@@ -704,6 +706,36 @@ web/                    Vite + TypeScript + three.js frontend
   | trot_clock_15 (8 motors, never shoved) | 100% | 81% | 31% | 12% | 0% | 0% |
   | walk12_tidy | 100% | 100% | 93% | 81% | 62% | 18% |
   (1 m/s ≈ 70 N on the viewer's push slider.)
+- **2026-09-25: Stand and get-up split** (the user watched stand12_reach:
+  "just moving way too much"). One policy for calm standing and for
+  getting up couldn't work well: getting up needs ±2 rad actions, which
+  make every twitch while standing 4× bigger, and its reward never asked
+  the legs to be still. Now `WalkConfig.task` = "walk" | "stand" |
+  "getup" (runs without it: getup if falls didn't end episodes, else
+  walk):
+  - `stand()`: ±0.5 rad actions; a fall ends the episode (fall penalty);
+    pose weight 1.0 with a tight σ 0.1 rad² (3° off on every joint keeps
+    74%); new `joint_speed` (−0.01 per (rad/s)²) and `wobble` (−0.5 per
+    (rad/s)² of torso tipping) terms; smoothness 0.1; shoves ≤ 1.5 m/s.
+  - `getup()`: see the next entry.
+  - Behaviors: slots walk / stand / getup. Loading walk or stand switches
+    to that mode; a get-up policy takes over after a fall in either mode
+    until `WalkTask.steady` (level within ~25°, > 80% height) for 0.5 s.
+    Stand mode can use the get-up policy when no stand policy is loaded.
+    StatusMessage gains `getup_policy`; the policy box shows it.
+- **2026-09-25: `stand12_reach` collapsed into lying on its belly** at
+  24–36M steps (time fallen 36% → 96%, energy −0.40 → −0.02, std stuck
+  at 0.15): lying level still paid "upright", "still", "don't turn"
+  (the gate only looked at tilt), and it was safe from the shoves. At 80M:
+  stays up from standing 1/8 (8/8 at 20M). → `getup()` redesigned:
+  - every episode starts fallen (fraction 1.0), 10 s, no shoves;
+  - it ends on success: `steady` for 0.5 s → `success_bonus` 10;
+  - only progress terms (upright 1.0, height 1.0) and `down` 2.5 per
+    fallen step, so every fallen step scores < 0 (fallen ⇒ upright +
+    height ≤ 1.5): lying still never pays, getting up sooner is better;
+  - no tracking / turn / pose / support terms (standing still is the
+    stand policy's job); ±2 rad actions.
+  Runs: `stand12_calm` (stand, 50M) and `getup12` (getup, 80M).
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -727,10 +759,9 @@ web/                    Vite + TypeScript + three.js frontend
   Stand modes with the automatic switch are built and tested. Training now,
   `walk12_tidy` (+ roll penalty) is done: straight, mostly tidy, and far
   more shove-proof (see Decisions); waiting for the user's verdict on its
-  look. `stand12_reach` (the stand task, 80M steps; earlier stand runs
-  learned to lie still, then couldn't reach the floor from their back) is
-  training: at 10M it stays up (8/8) and gets up from its belly (9/11), not
-  yet from its back (0/35), but time on its back is dropping fast.
+  look. Standing and getting up are now separate tasks (the combined one
+  "moved way too much" and later collapsed); training: `stand12_calm` and
+  `getup12`.
 - `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
   - 0 KL spikes (walk_10m: 114, max 50.5);
   - steady 1.0–1.28 m/s after 3M steps;
@@ -745,7 +776,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 126 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 130 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after

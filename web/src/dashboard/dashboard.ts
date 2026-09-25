@@ -91,7 +91,7 @@ const TERM_CHARTS: TermChart[] = [
     tickFormat: fixed(2),
   },
   {
-    terms: ["upright", "height", "pose"],
+    terms: ["upright", "height", "pose", "success"],
     title: "Rewards: posture",
     subtitle: "Rewards for staying up: level torso, standing height, standing pose.",
     format: fixed(3),

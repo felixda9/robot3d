@@ -280,8 +280,9 @@ class SimRunner:
         b = self.behaviors
         return StatusMessage(
             paused=self.sim.paused,
-            walk_policy=b.walk_label,
-            stand_policy=b.stand_label,
+            walk_policy=b.label("walk"),
+            stand_policy=b.label("stand"),
+            getup_policy=b.label("getup"),
             mode=b.mode,
             policy_active=self.sim.controller_active,
             recovering=b.recovering and self.sim.controller_active,

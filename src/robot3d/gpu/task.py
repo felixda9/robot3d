@@ -116,6 +116,9 @@ class BatchedWalkTask:
         turn_rate: torch.Tensor,
         height: torch.Tensor,
         joint_offset: torch.Tensor,
+        joint_velocity: torch.Tensor,
+        angular_velocity: torch.Tensor,
+        succeeded: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """(N,) rewards and (N,) per-term values, same terms as WalkTask.reward.
         feet_down, landed: (N, feet) bool; air_time, foot_height: (N, feet);
@@ -154,6 +157,9 @@ class BatchedWalkTask:
             "pose": c.pose_weight * upright * torch.exp(-(joint_offset**2).sum(dim=1) / c.pose_sigma),
             "down": -c.down_weight * fell.float(),
             "roll": -c.roll_weight * (joint_offset[:, self.roll_motors] ** 2).sum(dim=1),
+            "success": c.success_bonus * (succeeded.float() if succeeded is not None else torch.zeros_like(vx)),
+            "joint_speed": -c.joint_speed_weight * (joint_velocity**2).sum(dim=1),
+            "wobble": -c.wobble_weight * (angular_velocity[:, 0] ** 2 + angular_velocity[:, 1] ** 2),
         }
         return torch.stack(list(terms.values())).sum(dim=0), terms
 
@@ -168,6 +174,10 @@ class BatchedWalkTask:
     @staticmethod
     def up_z(torso_rot: torch.Tensor) -> torch.Tensor:
         return torso_rot[:, 2, 2]
+
+    def steady(self, qpos: torch.Tensor, torso_rot: torch.Tensor) -> torch.Tensor:
+        """Same as WalkTask.steady, batched."""
+        return (self.up_z(torso_rot) > 0.9) & (qpos[:, 2] > 0.8 * self.standing_height)
 
     def fell(self, qpos: torch.Tensor, torso_rot: torch.Tensor) -> torch.Tensor:
         c = self.config

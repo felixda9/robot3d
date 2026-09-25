@@ -39,7 +39,7 @@ def main() -> None:
     app = create_app(robot, args.keyframe, policy=args.policy)
     if args.policy:
         behaviors = app.state.runner.behaviors
-        print(f"Policy: {behaviors.walk_label or behaviors.stand_label} ({behaviors.mode})")
+        print(f"Policy: {behaviors.labels} (mode: {behaviors.mode})")
     uvicorn.run(app, host=args.host, port=args.port)
 
 

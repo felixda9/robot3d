@@ -104,6 +104,7 @@ class GpuWalkEnv:
         self.episode_return = torch.zeros(num_envs, device=self.device)
         self.start_xy = torch.zeros((num_envs, 2), device=self.device)
         self.next_push = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # episode step of the next shove
+        self.steady_steps = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # get-up task
         # Foot x/y and on-ground at the end of the last step (for slip, and
         # as "was down" for landings), and each foot's time in the air.
         self._feet_before: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -197,6 +198,9 @@ class GpuWalkEnv:
         landed, air_at_landing, self.air_time = task.air_time_update(self._feet_before[1], self.air_time, feet_down)
         torso_rot = self.xmat[:, 1]
         fell = task.fell(self.qpos, torso_rot)
+        steady = task.steady(self.qpos, torso_rot)
+        self.steady_steps = torch.where(steady, self.steady_steps + 1, torch.zeros_like(self.steady_steps))
+        succeeded = (self.steady_steps >= task.task.success_steps) & (task.config.success_bonus > 0)
         vx, vy = task.heading_velocity(torso_rot, vx, vy)
         reward, terms = task.reward(
             vx=vx, vy=vy, motor_power=power, action=actions, last_action=self.last_action,
@@ -206,11 +210,15 @@ class GpuWalkEnv:
             phase=task.gait_phase(self.episode_length + 1),  # the clock after this step
             turn_rate=task.turn_rate(self.qvel), height=self.qpos[:, 2],
             joint_offset=self.qpos[:, task.joint_qpos] - task.home_ctrl,
+            joint_velocity=self.qvel[:, task.joint_qvel], angular_velocity=self.qvel[:, 3:6],
+            succeeded=succeeded,
         )
         self.last_action = actions
         self.episode_length += 1
         self.episode_return += reward
-        terminated = fell & task.config.terminate_on_fall  # standing: no; it has to get up
+        # A fall ends a walk/stand episode; getting up steadily ends a get-up one.
+        fall_ends = fell & task.config.terminate_on_fall
+        terminated = fall_ends | succeeded
         time_out = (self.episode_length >= task.max_steps) & ~terminated
         done = terminated | time_out
 
@@ -223,7 +231,7 @@ class GpuWalkEnv:
             episode_return=self.episode_return[done].clone(),
             episode_length=self.episode_length[done].clone(),
             episode_distance=self._distance(self.qpos[done, 0:2] - self.start_xy[done]),
-            episode_fell=terminated[done].clone(),
+            episode_fell=fall_ends[done].clone(),
         )
         self._feet_before = feet_after
         if done.any():
@@ -256,6 +264,7 @@ class GpuWalkEnv:
         self.episode_length[mask] = 0
         self.episode_return[mask] = 0.0
         self.start_xy[mask] = self.qpos[mask, 0:2]
+        self.steady_steps[mask] = 0
         self.next_push[mask] = self._push_delays(self.num_envs)[mask]
 
     def _distance(self, displacement: torch.Tensor) -> torch.Tensor:

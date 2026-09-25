@@ -125,7 +125,7 @@ def evaluate(checkpoint: Checkpoint, episodes: int = 5, seed: int = 0) -> list[d
                 "seconds": seconds,
                 "distance": step_info["distance"],
                 "speed": step_info["distance"] / seconds,
-                "fell": terminated,
+                "fell": terminated and not step_info["succeeded"],
                 "upright": upright_steps / steps,
                 **gait_numbers(np.array(feet_down[settle_steps:]), task),
             }
@@ -154,39 +154,48 @@ def gait_numbers(feet_down: np.ndarray, task: WalkTask) -> dict:
 
 
 class Behaviors:
-    """The robot's trained behaviors, a walker and a stand policy, with an
-    automatic switch. Drives the simulation like any controller (Simulation's
-    Controller protocol).
+    """The robot's trained behaviors and the automatic switch between them.
+    Drives the simulation like any controller (Simulation's Controller protocol).
 
-    mode "stand": the stand policy drives (it stays up, catches shoves, and
-        gets up by itself after a fall).
-    mode "walk": the walker drives; if the robot falls and a stand policy is
-        loaded, the stand policy takes over ("recovering") until the robot
-        has stood steady for RECOVERED_SECONDS, then the walker resumes.
+    Up to three policies, one per task (the run's WalkConfig.task):
+      walk:  walks (Walk mode).
+      stand: stands still, catches shoves (Stand mode).
+      getup: gets up after a fall. Not a mode: whenever the robot falls
+             (WalkTask.fell) and it's loaded, it takes over ("recovering")
+             until the robot has stood steady for RECOVERED_SECONDS, then the
+             mode's policy drives again. With nothing else loaded, it also
+             stands (it was trained to stand once up).
     """
 
     RECOVERED_SECONDS = 0.5
+    TASKS = ("walk", "stand", "getup")
 
     def __init__(self) -> None:
-        self.walker: PolicyController | None = None
-        self.stander: PolicyController | None = None
-        self.walk_label = ""
-        self.stand_label = ""
+        self.policies: dict[str, PolicyController] = {}
+        self.labels: dict[str, str] = {}
         self.mode = "walk"
         self.recovering = False
         self._steady_steps = 0
 
+    def label(self, task: str) -> str:
+        return self.labels.get(task, "")
+
     def install(self, controller: PolicyController, label: str) -> None:
-        """Put a policy in its slot (stand policies: trained with the stand
-        task) and switch to its mode, so what you load is what you see."""
-        if controller.task.config.is_stand:
-            self.stander, self.stand_label, self.mode = controller, label, "stand"
-        else:
-            self.walker, self.walk_label, self.mode = controller, label, "walk"
+        """Put a policy in its task's slot. Walk and stand policies switch to
+        their mode (what you load is what you see); a get-up policy only
+        does, to "stand", when there's nothing else to drive."""
+        task = controller.task.config.task
+        self.policies[task] = controller
+        self.labels[task] = label
+        if task in ("walk", "stand"):
+            self.mode = task
+        elif not self.has(self.mode):
+            self.mode = "stand"
         self.reset()
 
     def has(self, mode: str) -> bool:
-        return (self.stander if mode == "stand" else self.walker) is not None
+        """Can this mode drive? (Stand mode can use the get-up policy.)"""
+        return mode in self.policies or (mode == "stand" and "getup" in self.policies)
 
     def set_mode(self, mode: str) -> None:
         if not self.has(mode):
@@ -197,9 +206,9 @@ class Behaviors:
     @property
     def active(self) -> PolicyController:
         """The policy driving right now."""
-        if self.mode == "stand" or self.recovering or self.walker is None:
-            return self.stander
-        return self.walker
+        if self.recovering:
+            return self.policies["getup"]
+        return self.policies.get(self.mode) or self.policies.get("getup") or next(iter(self.policies.values()))
 
     # --- Controller protocol
 
@@ -210,24 +219,23 @@ class Behaviors:
     def reset(self) -> None:
         self.recovering = False
         self._steady_steps = 0
-        for policy in (self.walker, self.stander):
-            if policy is not None:
-                policy.reset()
+        for policy in self.policies.values():
+            policy.reset()
 
     def reset_state(self, data: mujoco.MjData) -> None:
         self.active.reset_state(data)
 
     def act(self, data: mujoco.MjData) -> None:
-        if self.mode == "walk" and self.walker is not None and self.stander is not None:
-            task = self.walker.task
+        getup = self.policies.get("getup")
+        if getup is not None and self.active is not getup or self.recovering:
+            task = getup.task
             if not self.recovering and task.fell(data):
-                self.recovering = True  # hand over to the stand policy to get up
+                self.recovering = True  # hand over to the get-up policy
                 self._steady_steps = 0
-                self.stander.reset()
+                getup.reset()
             elif self.recovering:
-                steady = task.up_z(data) > 0.9 and data.qpos[2] > 0.8 * task.standing_height
-                self._steady_steps = self._steady_steps + 1 if steady else 0
+                self._steady_steps = self._steady_steps + 1 if task.steady(data) else 0
                 if self._steady_steps >= round(self.RECOVERED_SECONDS / task.control_dt):
-                    self.recovering = False  # up again: walk on
-                    self.walker.reset()
+                    self.recovering = False  # up again: back to the mode's policy
+                    self.active.reset()
         self.active.act(data)

@@ -82,13 +82,14 @@ def test_observation_ignores_position_and_heading(env):
 
 def reward_terms(task, vx=0.0, vy=0.0, feet_down=(1, 1, 1, 1), landed=(0, 0, 0, 0), air_time=(0, 0, 0, 0),
                  foot_height=(0, 0, 0, 0), phase=0.0, turn_rate=0.0, fell=False, height=None, joint_offset=0.0,
-                 up_z=1.0):
+                 up_z=1.0, joint_velocity=0.0, angular_velocity=(0.0, 0.0, 0.0)):
     return task.reward(
         vx=vx, vy=vy, motor_power=0.0, action=np.zeros(8), last_action=np.zeros(8), up_z=up_z, fell=fell,
         foot_slip=0.0, feet_down=np.array(feet_down, bool), landed=np.array(landed, bool),
         air_time=np.array(air_time, float), foot_height=np.array(foot_height, float), phase=phase,
         turn_rate=turn_rate, height=task.standing_height if height is None else height,
         joint_offset=np.full(task.num_actions, joint_offset),
+        joint_velocity=np.full(task.num_actions, joint_velocity), angular_velocity=np.array(angular_velocity),
     )[1]
 
 
@@ -177,35 +178,59 @@ def test_speed_is_measured_along_the_robots_heading(env):
     assert reward_terms(env.task, turn_rate=-1.0)["turn"] < 0.1 * straight  # circling fast
 
 
-def test_stand_task_rewards():
+def test_stand_task_rewards_stillness():
+    """Stand: hold the home pose exactly, legs and torso still; a fall ends it."""
     from robot3d.walk import WalkConfig
 
     stand = WalkEnv("quadruped", WalkConfig.stand()).task
     c = stand.config
-    assert c.is_stand and not WalkConfig().is_stand
-    up = reward_terms(stand)
-    assert up["tracking"] == pytest.approx(c.tracking_weight)  # standing still is on target
-    assert up["height"] == pytest.approx(c.height_weight) and up["pose"] == pytest.approx(c.pose_weight)
-    assert up["down"] == 0.0 and up["gait"] == 0.0
-    lying = reward_terms(stand, fell=True, height=0.08, joint_offset=0.8)
-    assert lying["down"] == -c.down_weight
-    assert lying["fall"] == 0.0  # no one-off fall penalty: the episode goes on
-    assert lying["height"] < 0.35 * c.height_weight and lying["pose"] < 0.01
-    # Lying still on its back in the standing pose earns nothing for being still or posed.
-    on_back = reward_terms(stand, fell=True, height=0.08, up_z=-1.0)
-    assert on_back["tracking"] == on_back["pose"] == on_back["turn"] == 0.0
-    half = reward_terms(stand, up_z=0.5)
-    assert half["tracking"] == pytest.approx(0.5 * c.tracking_weight)
-    walking = reward_terms(WalkEnv("quadruped").task, vx=0.4, up_z=0.5)
-    assert walking["tracking"] == pytest.approx(2.0)  # walk task: not gated
+    assert c.task == "stand" and c.terminate_on_fall and c.action_scale == 0.5
+    still = reward_terms(stand)
+    assert still["pose"] == pytest.approx(c.pose_weight) and still["tracking"] == pytest.approx(c.tracking_weight)
+    assert still["joint_speed"] == 0.0 and still["wobble"] == 0.0
+    assert reward_terms(stand, joint_offset=0.05)["pose"] > 0.7 * c.pose_weight  # 3 deg off: still most of it
+    assert reward_terms(stand, joint_offset=0.15)["pose"] < 0.2 * c.pose_weight  # 9 deg off on all 8 joints: little
+    fidget = reward_terms(stand, joint_velocity=2.0, angular_velocity=(1.0, 0.5, 0.0))
+    assert fidget["joint_speed"] == pytest.approx(-c.joint_speed_weight * 8 * 4.0)
+    assert fidget["wobble"] == pytest.approx(-c.wobble_weight * 1.25)
+    assert reward_terms(stand, fell=True)["fall"] == -c.fall_penalty
+    walk = reward_terms(WalkEnv("quadruped").task, joint_velocity=2.0, angular_velocity=(1.0, 0.5, 0.0))
+    assert walk["joint_speed"] == walk["wobble"] == 0.0  # walking: moving legs is the point
+
+
+def test_getup_task_rewards():
+    from robot3d.walk import WalkConfig
+
+    task = WalkEnv("quadruped", WalkConfig.getup()).task
+    c = task.config
+    assert c.task == "getup" and WalkConfig().task == "walk"
+    up = reward_terms(task)
+    assert up["height"] == pytest.approx(c.height_weight) and up["upright"] == pytest.approx(c.upright_weight)
+    assert up["tracking"] == up["turn"] == up["pose"] == up["down"] == up["success"] == 0.0
+    assert reward_terms(task, fell=True)["fall"] == 0.0  # a fall doesn't end it: get up!
+    # Every step spent fallen scores below zero, however it lies, so lying still never pays.
+    for up_z, height in [(1.0, 0.12), (0.49, task.standing_height), (-1.0, 0.04), (0.0, 0.1)]:
+        lying = reward_terms(task, fell=True, up_z=up_z, height=height)
+        assert sum(lying.values()) < 0, (up_z, height)
+    assert task.reward(**{**reward_inputs(task), "succeeded": True})[1]["success"] == c.success_bonus
     walk = reward_terms(WalkEnv("quadruped").task, fell=True, height=0.08)
     assert walk["fall"] < 0 and walk["down"] == 0.0 and walk["height"] == 0.0  # walking: unchanged
 
 
-def test_standing_episodes_survive_falls_and_some_start_fallen():
+def reward_inputs(task):
+    n = task.num_actions
+    return dict(
+        vx=0.0, vy=0.0, motor_power=0.0, action=np.zeros(n), last_action=np.zeros(n), up_z=1.0, fell=False,
+        foot_slip=0.0, feet_down=np.ones(4, bool), landed=np.zeros(4, bool), air_time=np.zeros(4),
+        foot_height=np.zeros(4), phase=0.0, turn_rate=0.0, height=task.standing_height, joint_offset=np.zeros(n),
+        joint_velocity=np.zeros(n), angular_velocity=np.zeros(3),
+    )
+
+
+def test_getup_episodes_start_fallen_and_end_when_up():
     from robot3d.walk import WalkConfig
 
-    env = WalkEnv("quadruped12", WalkConfig.stand())
+    env = WalkEnv("quadruped12", WalkConfig.getup())
     qpos, qvel = env.task.fallen_states
     assert qpos.shape == (env.task.FALLEN_STATES, env.model.nq) and np.isfinite(qpos).all()
     data = mujoco.MjData(env.model)
@@ -216,16 +241,17 @@ def test_standing_episodes_survive_falls_and_some_start_fallen():
         fallen.append(env.task.fell(data))
     assert np.mean(fallen) > 0.7  # most land on a side, back or belly
 
-    starts = []
-    for seed in range(20):
-        env.reset(seed=seed)
-        starts.append(env.task.fell(env.data))
-    assert 3 <= sum(starts) <= 17  # about half (fallen_start_fraction 0.5)
-
-    # A fallen robot doesn't end the episode.
-    env.reset(seed=next(i for i, f in enumerate(starts) if f))
-    _, reward, terminated, truncated, info = env.step(np.zeros(12))
+    # Lying down doesn't end the episode.
+    env.reset(seed=next(i for i in range(50) if env.reset(seed=i) is not None and env.task.fell(env.data)))
+    _, _, terminated, truncated, info = env.step(np.zeros(12))
     assert info["fell"] and not terminated and not truncated and info["reward_down"] < 0
+
+    # Standing steady for success_seconds ends it, with the bonus.
+    env.task.reset_state(env.data, np.random.default_rng(0), allow_fallen=False)
+    for step in range(env.task.success_steps):
+        _, _, terminated, _, info = env.step(np.zeros(12))
+        assert terminated == (step == env.task.success_steps - 1)
+    assert info["succeeded"] and info["reward_success"] == env.task.config.success_bonus
 
     # The viewer always starts it standing.
     rng = np.random.default_rng(0)
@@ -246,9 +272,11 @@ def test_roll_penalty():
         vx=0.4, vy=0.0, motor_power=0.0, action=np.zeros(12), last_action=np.zeros(12), up_z=1.0, fell=False,
         foot_slip=0.0, feet_down=np.ones(4, bool), landed=np.zeros(4, bool), air_time=np.zeros(4),
         foot_height=np.zeros(4), phase=0.0, turn_rate=0.0, height=task.standing_height, joint_offset=offsets,
+        joint_velocity=np.zeros(12), angular_velocity=np.zeros(3),
     )[1]
     assert terms["roll"] == pytest.approx(-task.config.roll_weight * 4 * 0.09)
-    assert WalkTask(model12, WalkConfig.stand()).config.roll_weight == 0.0  # getting up needs roll freely
+    assert WalkTask(model12, WalkConfig.getup()).config.roll_weight == 0.0  # getting up needs roll freely
+    assert WalkTask(model12, WalkConfig.stand()).config.roll_weight == 0.0  # the pose term covers roll
     assert len(WalkEnv("quadruped").task.roll_motors) == 0  # the 8-motor robot has none
 
 
@@ -325,6 +353,15 @@ def test_foot_slip_penalty(env):
     mujoco.mj_forward(env.model, env.data)
     _, _, _, _, info = env.step(np.zeros(8))
     assert info["reward_slip"] < -0.1
+
+
+def test_runs_from_before_the_task_field_get_their_task():
+    from robot3d.walk import WalkConfig
+
+    getup = {k: v for k, v in WalkConfig.getup().to_dict().items() if k != "task"}  # like stand12_reach
+    assert WalkConfig.from_run(getup).task == "getup"
+    walk = {k: v for k, v in WalkConfig().to_dict().items() if k != "task"}
+    assert WalkConfig.from_run(walk).task == "walk"
 
 
 def test_old_runs_keep_their_reward():

@@ -80,44 +80,49 @@ def test_gait_numbers_tell_a_trot_from_a_run():
     assert gait_numbers(trot[:1], task)["duty_factor"] is None  # fell right away: no gait
 
 
-def test_walk_mode_hands_over_to_the_stand_policy_after_a_fall(tiny_run, tiny_stand_run):
+def test_the_getup_policy_takes_over_after_a_fall(tiny_run, tiny_stand_run, tiny_getup_run):
     import mujoco
 
     from robot3d.policy import Behaviors
 
     sim = Simulation("quadruped")
-    walker = PolicyController(find_checkpoint(tiny_run), sim.model)
-    stander = PolicyController(find_checkpoint(tiny_stand_run), sim.model)
+    walker, stander, getup = (PolicyController(find_checkpoint(r), sim.model)
+                              for r in (tiny_run, tiny_stand_run, tiny_getup_run))
     behaviors = Behaviors()
     behaviors.install(walker, "walker")
     assert behaviors.mode == "walk"
     behaviors.install(stander, "stander")
-    assert behaviors.mode == "stand"  # loading a policy switches to its mode
-    behaviors.set_mode("walk")
+    assert behaviors.mode == "stand"  # loading a walk or stand policy switches to its mode
+    behaviors.install(getup, "getup")
+    assert behaviors.mode == "stand"  # a get-up policy doesn't
     sim.set_controller(behaviors)  # restarts standing
 
     def knock_over():
         sim.data.qpos[3:7] = [0, 1, 0, 0]  # upside down
         mujoco.mj_forward(sim.model, sim.data)
 
-    behaviors.act(sim.data)
-    assert behaviors.active is walker and not behaviors.recovering
-    knock_over()
-    behaviors.act(sim.data)
-    assert behaviors.recovering and behaviors.active is stander  # the stand policy gets it up
-    walker.reset_state(sim.data)  # (placed back on its feet)
-    for _ in range(24):  # 0.48 s standing steady: not yet
+    for mode, policy in (("walk", walker), ("stand", stander)):
+        behaviors.set_mode(mode)
+        sim.reset()
         behaviors.act(sim.data)
-    assert behaviors.recovering
-    behaviors.act(sim.data)  # 0.5 s: walk on
-    assert behaviors.active is walker and not behaviors.recovering
+        assert behaviors.active is policy and not behaviors.recovering
+        knock_over()
+        behaviors.act(sim.data)
+        assert behaviors.recovering and behaviors.active is getup, mode  # the get-up policy takes over
+        policy.reset_state(sim.data)  # (placed back on its feet)
+        for _ in range(24):  # 0.48 s standing steady: not yet
+            behaviors.act(sim.data)
+        assert behaviors.recovering
+        behaviors.act(sim.data)  # 0.5 s: back to the mode's policy
+        assert behaviors.active is policy and not behaviors.recovering
 
-    behaviors.set_mode("stand")
-    knock_over()
-    behaviors.act(sim.data)
-    assert behaviors.active is stander and not behaviors.recovering  # stand mode: it's the stand policy's job anyway
+    only_getup = Behaviors()
     with pytest.raises(ValueError, match="no stand policy"):
-        Behaviors().set_mode("stand")
+        only_getup.set_mode("stand")
+    only_getup.install(getup, "getup")
+    assert only_getup.mode == "stand" and only_getup.active is getup  # it can stand too
+    with pytest.raises(ValueError, match="no walk policy"):
+        only_getup.set_mode("walk")
 
 
 def test_policy_drives_a_live_simulation(tiny_run):

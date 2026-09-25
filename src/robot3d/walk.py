@@ -1,6 +1,7 @@
-"""The "walk forward" task (and, with WalkConfig.stand(), the "stand" task):
-what a policy observes, how its actions become motor targets, and how it is
-rewarded.
+"""The robot's tasks: "walk" (WalkConfig()), "stand" (WalkConfig.stand()) and
+"getup" (WalkConfig.getup()). What a policy observes, how its actions become
+motor targets, and how it is rewarded. One task class with settings, so every
+task shares the observation, the motors, the GPU pipeline and the viewer.
 
 Shared by the Gymnasium environment (training, envs.py) and the policy player
 in the web server (watching, policy.py), so a policy sees and acts exactly
@@ -21,6 +22,9 @@ import numpy as np
 
 @dataclass(frozen=True)
 class WalkConfig:
+    # "walk", "stand" (stand still, catch shoves) or "getup" (get up after a fall).
+    task: str = "walk"
+
     # --- control
     control_dt: float = 0.02  # the policy acts at 50 Hz (every 10 physics steps of 2 ms)
     action_scale: float = 0.5  # action +-1 = target +-0.5 rad around the home pose
@@ -75,6 +79,10 @@ class WalkConfig:
     # still use roll to catch a shove. (legged_gym setups call it "hip_pos".)
     roll_weight: float = 1.0
     fall_penalty: float = 10.0  # once, when the episode ends by falling (terminate_on_fall)
+    # Stillness, for standing (0 while walking): stand12_reach "moved way too
+    # much" (the user), with only the torso's drift penalized.
+    joint_speed_weight: float = 0.0  # per (rad/s)^2 of joint speed, summed over the motors
+    wobble_weight: float = 0.0  # per (rad/s)^2 of torso tipping (angular velocity about its x and y axes)
 
     # Posture terms, for standing (0 while walking):
     height_weight: float = 0.0  # x torso height / standing height (capped at 1): be up
@@ -106,44 +114,77 @@ class WalkConfig:
     push_interval: float = 4.0  # s
     push_max_speed: float = 1.0  # m/s
 
-    # --- starting fallen (standing task): this share of episodes starts from
-    # a random fallen pose (on its side, back, belly...), so the policy
-    # practices getting up, not only staying up.
+    # --- starting fallen (get-up task): this share of episodes starts from
+    # a random fallen pose (on its side, back, belly...).
     fallen_start_fraction: float = 0.0
+
+    # --- success (get-up task): standing steady (WalkTask.steady) for
+    # success_seconds ends the episode with success_bonus. 0 = off.
+    success_bonus: float = 0.0
+    success_seconds: float = 0.5
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def stand(cls) -> "WalkConfig":
-        """The stand task (5c): stay upright where you are, catch shoves by
-        stepping if needed, and get back up after a fall. The same robot
-        interface as walking, so the viewer can switch between the two."""
+        """The stand task: stand still in the home pose; when shoved, catch
+        yourself (with a step if needed) and settle back into it. A fall ends
+        the episode: getting up is the get-up policy's job (getup())."""
         return cls(
-            target_speed=0.0,  # the speed reward now pays for standing still
+            task="stand",
+            target_speed=0.0,  # the speed reward pays for not drifting
             tracking_weight=1.0,
             gait_frequency=0.0,  # no stepping rhythm: step only when needed
             gait_weight=0.0,
             clearance_weight=0.0,
             upright_weight=1.0,
-            height_weight=1.0,
-            pose_weight=0.5,
-            down_weight=1.0,
-            posture_gating=True,
+            pose_weight=1.0,
+            pose_sigma=0.1,  # tight: 0.05 rad off on every joint keeps 74% of it, 0.1 rad 30%
+            joint_speed_weight=0.01,  # legs still (1 rad/s on all 12 joints: -0.12 per step)
+            wobble_weight=0.5,  # torso still (tipping at 1 rad/s: -0.5 per step)
+            smoothness_weight=0.1,
+            roll_weight=0.0,  # the pose term covers the roll joints too
+            push_max_speed=1.5,  # standing still, it should take harder shoves than while walking
+        )
+
+    @classmethod
+    def getup(cls) -> "WalkConfig":
+        """The get-up task (5c): from lying on its side, back or belly, get up.
+        It only drives after a fall; the stand or walk policy takes over again
+        once the robot stands steady, so an episode ends right there, with a
+        success bonus. Every step spent fallen scores below zero, so getting
+        up sooner is better and lying still never pays.
+
+        (The runs stand12, stand12_gated, stand12_reach combined standing and
+        getting up; stand12_reach collapsed into lying on its belly: level,
+        so "upright", "still" and "don't turn" paid, and safe from shoves.)"""
+        return cls(
+            task="getup",
+            target_speed=0.0,
+            tracking_weight=0.0,  # standing still is the stand policy's job
+            turn_weight=0.0,
+            gait_frequency=0.0,
+            gait_weight=0.0,
+            clearance_weight=0.0,
+            support_weight=0.0,
+            upright_weight=1.0,  # progress: level torso ...
+            height_weight=1.0,  # ... and height
+            # While fallen, upright + height <= 1.5 (fallen = tilted > 60 deg or
+            # below half height), so this makes every fallen step negative.
+            down_weight=2.5,
+            success_bonus=10.0,
             fall_penalty=0.0,
             terminate_on_fall=False,
-            fallen_start_fraction=0.5,
-            push_max_speed=1.5,  # standing still, it should take harder shoves than while walking
+            fallen_start_fraction=1.0,  # every episode starts fallen
+            push_interval=0.0,
+            episode_seconds=10.0,
             # Getting up takes big leg movements: actions reach +-2 rad around
             # the standing pose (walking: +-0.5), about each joint's full range.
             # (stand12_gated, at +-0.5: 0 of 46 got up from their back.)
             action_scale=2.0,
-            roll_weight=0.0,  # getting up needs the roll joints freely; the pose term tidies up afterwards
+            roll_weight=0.0,  # getting up needs the roll joints freely
         )
-
-    @property
-    def is_stand(self) -> bool:
-        return not self.terminate_on_fall
 
     @classmethod
     def from_run(cls, saved: dict) -> "WalkConfig":
@@ -164,6 +205,8 @@ class WalkConfig:
             "turn_weight": 0.0,
             "roll_weight": 0.0,
         }
+        if "task" not in saved:  # before the task field: the stand12* runs were get-up runs
+            saved = {**saved, "task": "getup" if saved.get("terminate_on_fall") is False else "walk"}
         unknown = sorted(set(saved) - {f.name for f in fields(cls)})
         if unknown:
             # The run was trained by newer code than this process is running
@@ -305,6 +348,9 @@ class WalkTask:
         turn_rate: float,
         height: float,
         joint_offset: np.ndarray,
+        joint_velocity: np.ndarray,
+        angular_velocity: np.ndarray,
+        succeeded: bool = False,
     ) -> tuple[float, dict[str, float]]:
         """Reward for one control step, plus each term separately (for logging).
 
@@ -312,6 +358,8 @@ class WalkTask:
             heading_velocity()), m/s.
         turn_rate: how fast the torso turns about its own up axis, rad/s.
         height: torso height, m. joint_offset: joint angles - home pose, rad.
+        joint_velocity: joint speeds, rad/s. angular_velocity: the torso's, in
+            its own frame (x, y: tipping; z: turning), rad/s.
         foot_slip: sum over planted feet of (sliding speed)^2, see foot_slip().
         feet_down: which feet are on the ground (bool per foot).
         landed, air_time: which feet touched down this step, and how long each
@@ -349,6 +397,9 @@ class WalkTask:
             "pose": c.pose_weight * upright * math.exp(-float(np.sum(joint_offset**2)) / c.pose_sigma),
             "down": -c.down_weight * float(fell),
             "roll": -c.roll_weight * float(np.sum(joint_offset[self.roll_motors] ** 2)),
+            "success": c.success_bonus * float(succeeded),
+            "joint_speed": -c.joint_speed_weight * float(np.sum(joint_velocity**2)),
+            "wobble": -c.wobble_weight * float(angular_velocity[0] ** 2 + angular_velocity[1] ** 2),
         }
         return float(sum(terms.values())), terms
 
@@ -420,6 +471,16 @@ class WalkTask:
     def up_z(data: mujoco.MjData) -> float:
         """z-component of the torso's "up" axis: 1 = level, 0 = on its side, -1 = upside down."""
         return float(data.xmat[1][8])
+
+    def steady(self, data: mujoco.MjData) -> bool:
+        """Standing up properly: torso level (within ~25 deg) and at > 80% of
+        standing height. Held for success_seconds, a get-up episode succeeds;
+        in the viewer, the get-up policy hands back to walking/standing."""
+        return self.up_z(data) > 0.9 and data.qpos[2] > 0.8 * self.standing_height
+
+    @property
+    def success_steps(self) -> int:
+        return round(self.config.success_seconds / self.control_dt)
 
     def fell(self, data: mujoco.MjData) -> bool:
         too_tilted = self.up_z(data) < self.config.min_up_z

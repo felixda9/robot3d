@@ -27,6 +27,7 @@ const ui = {
   modeWalk: element<HTMLButtonElement>("mode-walk"),
   modeStand: element<HTMLButtonElement>("mode-stand"),
   recovering: element<HTMLDivElement>("recovering"),
+  getupName: element<HTMLDivElement>("getup-name"),
   simTime: element<HTMLSpanElement>("sim-time"),
   streamFps: element<HTMLSpanElement>("stream-fps"),
   motors: element<HTMLDivElement>("motors"),
@@ -45,12 +46,15 @@ let status: StatusMessage = {
   paused: false,
   walk_policy: "",
   stand_policy: "",
+  getup_policy: "",
   mode: "walk",
   policy_active: false,
   recovering: false,
 };
-const hasPolicy = (): boolean => status.walk_policy !== "" || status.stand_policy !== "";
-const policyFor = (mode: Mode): string => (mode === "walk" ? status.walk_policy : status.stand_policy);
+const hasPolicy = (): boolean => status.walk_policy !== "" || status.stand_policy !== "" || status.getup_policy !== "";
+/** The policy a mode would use ("" = can't): stand mode falls back on the get-up policy. */
+const policyFor = (mode: Mode): string =>
+  mode === "walk" ? status.walk_policy : status.stand_policy || status.getup_policy;
 new RobotMouse(viewer, (message) => connection.send(message), () => Number(ui.pushForce.value));
 let presetCount = 0;
 let framesThisSecond = 0;
@@ -119,6 +123,10 @@ function applyStatus(next: StatusMessage): void {
         : `${mode === "walk" ? "Walk" : "Stand: stays upright in place, gets up after falls"} (M switches)`;
   }
   ui.recovering.hidden = !status.recovering;
+  ui.getupName.textContent =
+    status.getup_policy === ""
+      ? "Get-up: none (after a fall it stays down)"
+      : `Get-up: ${status.getup_policy}`;
   ui.policyToggle.textContent = status.policy_active ? "Take manual control" : "Let the policy drive";
   motors.setLocked(status.policy_active);
   updateHelp();
@@ -249,7 +257,7 @@ window.addEventListener("keydown", (event) => {
 function updateHelp(): void {
   const parts = ["<kbd>Space</kbd> play/pause", "<kbd>R</kbd> reset", "<kbd>F</kbd> follow"];
   if (hasPolicy()) parts.push("<kbd>P</kbd> policy/manual");
-  if (status.walk_policy !== "" && status.stand_policy !== "") parts.push("<kbd>M</kbd> walk/stand");
+  if (policyFor("walk") !== "" && policyFor("stand") !== "") parts.push("<kbd>M</kbd> walk/stand");
   if (!status.policy_active && presetCount > 0) {
     parts.push(`<kbd>${presetCount > 1 ? `1–${Math.min(presetCount, 9)}` : "1"}</kbd> poses`);
   }

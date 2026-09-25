@@ -133,6 +133,13 @@ body {
   color: var(--accent);
 }
 
+.getup-name {
+  max-width: 220px;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
 .recovering {
   font-size: 12px;
   color: var(--accent);
