@@ -121,8 +121,9 @@ def test_gait_clock_schedule(env):
     task = env.task
     c = task.config
     assert task.clock and task.obs_size == 36
-    steps_per_cycle = round(1 / (c.gait_frequency * task.control_dt))
-    assert task.gait_phase(0) == 0.0 and task.gait_phase(steps_per_cycle) == pytest.approx(0.0, abs=1e-9)
+    one_second = round(1 / task.control_dt)
+    assert task.gait_phase(0) == 0.0
+    assert task.gait_phase(one_second) == pytest.approx(c.gait_frequency % 1.0, abs=1e-9)  # 1.5 Hz: half a cycle on
     # FL+RR down in phase [0, 0.6), FR+RL in [0.5, 1.1): trot-walk with brief 4-feet moments
     FL, FR, RL, RR = 0, 1, 2, 3
     assert task.desired_down(0.05).tolist() == [True, True, True, True]  # both pairs down (FR+RL landing)

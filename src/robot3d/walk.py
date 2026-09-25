@@ -38,7 +38,9 @@ class WalkConfig:
     # and FR+RL take turns, each foot down for `gait_duty` of every cycle.
     # Without it, the policy found a loophole (trot_rsl: back feet never
     # lifted, it scooted). gait_frequency 0 = no clock (runs before it existed).
-    gait_frequency: float = 2.0  # cycles per second: each foot steps twice a second
+    # Cycles per second: each foot steps 1.5 times a second (~27 cm strides at
+    # 0.4 m/s). The user preferred it to 2 Hz (trot_clock_15 vs trot_clock).
+    gait_frequency: float = 1.5
     gait_duty: float = 0.6  # share of a cycle each foot is down; > 0.5 = a walk (never airborne)
     gait_weight: float = 1.0  # x share of feet whose contact matches the schedule
     swing_height: float = 0.04  # m: lift swinging feet this high ...
