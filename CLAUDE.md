@@ -833,6 +833,17 @@ web/                    Vite + TypeScript + three.js frontend
   a "Shove test"/"Get-up test" column; best = highest skill (ties: the
   newer). Evaluations without a skill count as not evaluated, so the
   Evaluate button fills them in.
+- **2026-09-25: `walk12_robust` result** (walk12_tidy fine-tuned 60M steps
+  with the push-robust recipe; curriculum level 1.0 → 2.63 m/s on
+  average; training falls ~40% of episodes under shoves every 1–3 s):
+  | shove (m/s) | 0.5 | 1.0 | 1.5 | 2.0 | 2.5 | 3.0 |
+  | walk12_tidy | 100% | 100% | 93% | 81% | 62% | 18% |
+  | walk12_robust | 100% | 100% | 93% | 81% | 68% | 56% |
+  (the same under tidy's stricter 60° fall rule, so not an artifact of
+  its looser 80° one). Gait: 0.39 m/s, −1.2 °/s, a bit wider and lower
+  at the back (roll 9° out on the left legs, rear hips 20° back vs
+  6–8° / 8–14°): the braced stance robust walkers tend to take.
+  Skill-test "best": getup12_v3 50M (100%), stand12_v3 47.6M (78%).
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -862,8 +873,9 @@ web/                    Vite + TypeScript + three.js frontend
   from every fallen pose tested, and the Walk/Stand/get-up chain works.
   Waiting for the user to try them. A second survey (walking under
   pushes) led to `walk12_robust`: walk12_tidy fine-tuned with a shove
-  curriculum to 3 m/s, looser falls and paused gait rules while knocked
-  off speed (training, 60M steps).
+  curriculum; 3× the survival at 3 m/s shoves (56% vs 18%), same below.
+  The dashboard now picks "best" checkpoints by task-specific skill tests.
+  Waiting for the user to try walk12_robust + stand12_v3 + getup12_v3.
 - `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
   - 0 KL spikes (walk_10m: 114, max 50.5);
   - steady 1.0–1.28 m/s after 3M steps;
