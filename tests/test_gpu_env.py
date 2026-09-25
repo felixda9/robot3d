@@ -163,6 +163,29 @@ def test_fine_tuning_starts_from_the_checkpoint(tmp_path):
     assert np.abs(actions(tuned_dir) - a_last).mean() < np.abs(actions(fresh_dir) - a_last).mean()  # b started from a
 
 
+def test_force_pushes_on_the_gpu():
+    from robot3d.gpu.env import GpuWalkEnv
+    from robot3d.walk import WalkConfig
+
+    config = WalkConfig(push_kind="force", push_interval=0.5, push_max_speed=1.0, push_curriculum_max=0.0,
+                        push_max_spin=0.0)
+    env = GpuWalkEnv(num_envs=128, robot="quadruped12", config=config, device="cuda:0", seed=5)
+    env.reset(randomize_episode_start=False)
+    still = torch.zeros((env.num_envs, env.num_actions), device=env.device)
+    running = torch.zeros(env.num_envs, device=env.device)  # length of the current push so far
+    finished = []  # lengths of pushes that ended
+    max_speed = torch.zeros(env.num_envs, device=env.device)
+    for _ in range(round(1.0 / env.task.control_dt)):  # 1 s: each robot is pushed once or twice
+        result = env.step(still)
+        active = env.xfrc[:, 1].abs().sum(dim=1).gt(0)
+        # (a robot knocked over by an earlier push restarts, which rightly cancels its push)
+        finished += running[~active & (running > 0) & ~result.done].tolist()
+        running = torch.where(active, running + 1, torch.zeros_like(running))
+        max_speed = torch.maximum(max_speed, env.qvel[:, :2].norm(dim=1))
+    assert finished and set(finished) == {5.0}  # every push lasted 0.1 s (5 control steps)
+    assert max_speed.mean() > 0.15  # they moved
+
+
 def test_tiny_rsl_training_run_plays_in_cpu_mujoco(tmp_path):
     from robot3d.gpu.rsl import RslConfig, train_rsl
     from robot3d.policy import PolicyController

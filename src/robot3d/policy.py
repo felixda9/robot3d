@@ -18,7 +18,7 @@ import mujoco
 import numpy as np
 
 # Checkpoint discovery lives in runs.py (no PyTorch); re-exported here.
-from robot3d.runs import Checkpoint, find_checkpoint, list_checkpoints  # noqa: F401
+from robot3d.runs import SKILL_TEST_VERSION, Checkpoint, find_checkpoint, list_checkpoints  # noqa: F401
 from robot3d.walk import WalkConfig, WalkTask
 
 
@@ -245,7 +245,7 @@ class Behaviors:
 
 # ------------------------------------------------------------- skill tests
 
-SHOVE_TEST_SPEEDS = (1.0, 2.0)  # m/s (the viewer's push slider: ~70 and ~140 N)
+SHOVE_TEST_SPEEDS = (1.0, 2.0)  # m/s of push (quadruped12: 72 and 144 N on the viewer's slider)
 SHOVE_TEST_DIRECTIONS = 16
 GETUP_TEST_BANK_STARTS = 16
 GETUP_TEST_UPSIDE_DOWN = 8
@@ -257,9 +257,12 @@ def skill_test(checkpoint: Checkpoint) -> dict:
     over a few episodes was too noisy to pick one: one unlucky shove, or a
     lucky set of easy starts, decided it.)
 
-    walk, stand: a shove test. For each of SHOVE_TEST_SPEEDS and
-        SHOVE_TEST_DIRECTIONS: 3 s of walking/standing, one sudden shove,
-        survived if not fallen 3 s later.
+    walk, stand: a push test, pushed the way the viewer pushes (a force for
+        0.1 s on the torso's side, halfway up: WalkEnv.push). For each of
+        SHOVE_TEST_SPEEDS and SHOVE_TEST_DIRECTIONS: 3 s of walking/standing,
+        one push, survived if not fallen 3 s later. (v1 used velocity kicks at
+        the center of mass: far easier than the viewer's pushes, which also
+        tip the robot; stand12_v3 scored 78% yet fell to 60 N side pushes.)
     getup: GETUP_TEST_BANK_STARTS fallen poses from the fallen bank plus
         GETUP_TEST_UPSIDE_DOWN upside down with random leg angles; passed if
         standing steady (WalkTask.steady) for 0.5 s within 10 s.
@@ -284,8 +287,7 @@ def skill_test(checkpoint: Checkpoint) -> dict:
                 controller.reset()
                 for _ in range(steps(3.0)):
                     env.step(controller.action(data))
-                angle = 2 * np.pi * k / SHOVE_TEST_DIRECTIONS
-                data.qvel[0:2] += speed * np.array([np.cos(angle), np.sin(angle)])
+                env.push(2 * np.pi * k / SHOVE_TEST_DIRECTIONS, speed, height=0.5)
                 fell = False
                 for _ in range(steps(3.0)):
                     env.step(controller.action(data))
@@ -294,9 +296,10 @@ def skill_test(checkpoint: Checkpoint) -> dict:
                         break
                 total += 1
                 passed += not fell
-        speeds = " and ".join(f"{s:g}" for s in SHOVE_TEST_SPEEDS)
+        newtons = " and ".join(f"{round(s * task.robot_mass / task.PUSH_SECONDS)}" for s in SHOVE_TEST_SPEEDS)
         return {"skill": passed / total,
-                "skill_test": f"shoves of {speeds} m/s from {SHOVE_TEST_DIRECTIONS} directions"}
+                "skill_test": f"{SKILL_TEST_VERSION}: pushes of {newtons} N (0.1 s, torso side) "
+                              f"from {SHOVE_TEST_DIRECTIONS} directions"}
 
     rng = np.random.default_rng(0)
     bank_qpos, bank_qvel = task.fallen_states
@@ -331,4 +334,5 @@ def skill_test(checkpoint: Checkpoint) -> dict:
                 passed += 1
                 break
     return {"skill": passed / len(starts),
-            "skill_test": f"{len(starts)} fallen starts ({GETUP_TEST_UPSIDE_DOWN} upside down), up within 10 s"}
+            "skill_test": f"{SKILL_TEST_VERSION}: {len(starts)} fallen starts ({GETUP_TEST_UPSIDE_DOWN} upside down), "
+                          "up within 10 s"}

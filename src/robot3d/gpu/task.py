@@ -43,6 +43,8 @@ class BatchedWalkTask:
         self.pair_b = tensor([b for _, b in pairs], torch.long)
         self.has_pairs = bool(task.diagonal_pairs)
         self.clock = task.clock
+        self.robot_mass = task.robot_mass
+        self.torso_half_size = tensor(task.torso_half_size)
         self.roll_motors = tensor(task.roll_motors, torch.long)
         self.foot_phase_offset = tensor(task.foot_phase_offset, torch.float64)
         if self.config.fallen_start_fraction > 0:
@@ -173,6 +175,7 @@ class BatchedWalkTask:
             "wobble": -c.wobble_weight * calm * (angular_velocity[:, 0] ** 2 + angular_velocity[:, 1] ** 2),
             "orientation": c.orientation_weight * torch.exp(-4.0 * (1.0 - up_z)),
             "hold": c.hold_weight * is_up * at_height * torch.exp(-0.5 * (action**2).sum(dim=1)),
+            "stance": c.stance_weight * calm * feet_down.float().mean(dim=1),
         }
         total = torch.stack(list(terms.values())).sum(dim=0)
         return (total.clamp(min=0.0) if c.reward_floor else total), terms
@@ -214,6 +217,18 @@ class BatchedWalkTask:
     @staticmethod
     def turn_rate(qvel: torch.Tensor) -> torch.Tensor:
         return qvel[:, 5]
+
+    def push_wrench(self, torso_rot, torso_pos, torso_com, angle, size, height):
+        """Same as WalkTask.push_wrench, for (N,) angles/sizes/heights: (N, 3) force, torque."""
+        direction = torch.stack([angle.cos(), angle.sin(), torch.zeros_like(angle)], dim=1)
+        force = direction * (size * self.robot_mass / self.task.PUSH_SECONDS)[:, None]
+        local = torch.einsum("nji,nj->ni", torso_rot, direction)  # R^T u
+        hx, hy, hz = self.torso_half_size
+        reach = 1.0 / torch.maximum(torch.maximum(local[:, 0].abs() / hx, local[:, 1].abs() / hy),
+                                    torch.full_like(angle, 1e-9))
+        offset = torch.stack([-local[:, 0] * reach, -local[:, 1] * reach, height * hz], dim=1)
+        point = torso_pos + torch.einsum("nij,nj->ni", torso_rot, offset)
+        return force, torch.cross(point - torso_com, force, dim=1)
 
     def foot_heights(self, geom_xpos: torch.Tensor) -> torch.Tensor:
         """(N, feet) each foot's lowest point above the floor."""

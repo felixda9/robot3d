@@ -132,6 +132,21 @@ def test_action_to_ctrl_and_reward_match(snapshots):
             assert terms[name][i].item() == pytest.approx(value, rel=1e-5, abs=1e-5), name
 
 
+def test_push_wrench_matches(snapshots):
+    task, rows = snapshots
+    batched = BatchedWalkTask(task, "cpu")
+    rng = np.random.default_rng(5)
+    angle, size, height = rng.uniform(0, 2 * np.pi, N), rng.uniform(0, 3, N), rng.uniform(-1, 1, N)
+    pos, com = rng.normal(size=(N, 3)), rng.normal(size=(N, 3))
+    as_t = lambda x: torch.tensor(x, dtype=torch.float32)  # noqa: E731
+    force, torque = batched.push_wrench(stack(rows, "after", "rot"), as_t(pos), as_t(com), as_t(angle), as_t(size),
+                                        as_t(height))
+    for i, row in enumerate(rows):
+        f, t = task.push_wrench(row["after"]["rot"], pos[i], com[i], angle[i], size[i], height[i])
+        np.testing.assert_allclose(force[i].numpy(), f, rtol=1e-4, atol=1e-3)
+        np.testing.assert_allclose(torque[i].numpy(), t, rtol=1e-4, atol=1e-3)
+
+
 def test_heading_velocity_matches(snapshots):
     task, rows = snapshots
     batched = BatchedWalkTask(task, "cpu")

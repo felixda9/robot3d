@@ -95,6 +95,10 @@ class WalkConfig:
     # moving, stood still but wouldn't step to catch a shove.
     stillness_speed_gate: float = 0.0
 
+    # x share of feet on the ground, while calm (standing): stand12_v3 rested
+    # on three feet, the fourth 49 mm up, since nothing asked for four.
+    stance_weight: float = 0.0
+
     # Getting up (MuJoCo Playground's Go1 getup recipe; 0 elsewhere):
     orientation_weight: float = 0.0  # x exp(-4 (1 - up_z)): 1 level, 0.02 on its side, ~0 on its back
     hold_weight: float = 0.0  # x exp(-0.5 |action|^2), once up (gates below): hold still (relative actions)
@@ -144,6 +148,14 @@ class WalkConfig:
     # or sideways shoves reach it too). "axes" (until walk12_tidy): x and y
     # each uniform in +-max, so straight shoves never exceeded 1 m/s.
     push_direction: str = "circle"
+    # "kick": the torso's velocity jumps (legged_gym, Isaac Lab, mjlab).
+    # "force": like the viewer's double-click: a horizontal force for
+    # PUSH_SECONDS at a point on the torso's side, from mid-height to the top
+    # edge, so it also tips the robot (a 60 N push on the upper side edge:
+    # 0.8 m/s sideways and 143 deg/s of roll). Its size is still given in m/s,
+    # the speed it would give the whole robot (1 m/s ~ 72 N for quadruped12).
+    # stand12_v3, trained with kicks, fell to 60 N side pushes in the viewer.
+    push_kind: str = "kick"
     push_max_spin: float = 0.5  # rad/s: also kick the torso's roll/pitch/yaw rate by up to this (mjlab: ~0.5)
     # Shove curriculum (GPU training; > 0 = on): each robot's max shove starts
     # at push_max_speed, grows by push_curriculum_step every episode it
@@ -188,7 +200,10 @@ class WalkConfig:
             smoothness_weight=0.1,
             roll_weight=0.0,  # the pose term covers the roll joints too
             reward_floor=True,
-            push_max_speed=1.0,
+            push_kind="force",  # pushed the way the viewer pushes (see push_kind)
+            push_max_speed=1.0,  # (curriculum up to push_curriculum_max = 3 m/s, ~216 N)
+            push_max_spin=0.0,  # force pushes tip the robot by themselves
+            stance_weight=1.0,
         )
 
     @classmethod
@@ -328,6 +343,10 @@ class WalkTask:
 
         self.standing_qpos, self.standing_qvel = self._settled_standing_state(keyframe)
         self.standing_height = float(self.standing_qpos[2])
+        self.robot_mass = float(model.body_subtreemass[1])
+        # The torso's half-size (the box geom named "torso"), where pushes land.
+        torso_geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "torso")
+        self.torso_half_size = model.geom_size[torso_geom].copy() if torso_geom >= 0 else np.array([0.1, 0.1, 0.05])
         joints = model.actuator_trnid[:, 0]
         self.joint_range = model.jnt_range[joints].copy()  # (motors, 2) min/max angle
         # Sideways (roll) motors, by the naming convention "<leg>_roll" (quadruped12).
@@ -376,6 +395,22 @@ class WalkTask:
         return np.concatenate(parts).astype(np.float32)
 
     # ------------------------------------------------------------------ pushes
+
+    PUSH_SECONDS = 0.1  # a force push lasts this long (as the viewer's, Simulation.PUSH_SECONDS)
+
+    def push_wrench(self, torso_rot: np.ndarray, torso_pos: np.ndarray, torso_com: np.ndarray,
+                    angle: float, size: float, height: float) -> tuple[np.ndarray, np.ndarray]:
+        """(force, torque about the torso's center of mass) of a viewer-like
+        push: horizontal in world direction `angle`, `size` m/s of impulse for
+        the whole robot spread over PUSH_SECONDS, landing on the torso's side
+        that faces the pusher, `height` (-1..1) of its half-height up."""
+        direction = np.array([math.cos(angle), math.sin(angle), 0.0])
+        force = direction * size * self.robot_mass / self.PUSH_SECONDS
+        local = torso_rot.T @ direction  # push direction in the torso's frame
+        hx, hy, hz = self.torso_half_size
+        reach = 1.0 / max(abs(local[0]) / hx, abs(local[1]) / hy, 1e-9)  # to the box's side, horizontally
+        point = torso_pos + torso_rot @ np.array([-local[0] * reach, -local[1] * reach, height * hz])
+        return force, np.cross(point - torso_com, force)
 
     def push_delay(self, uniform: float) -> int:
         """Control steps until the next push, from a uniform(0, 1) random number."""
@@ -473,6 +508,7 @@ class WalkTask:
             "wobble": -c.wobble_weight * calm * float(angular_velocity[0] ** 2 + angular_velocity[1] ** 2),
             "orientation": c.orientation_weight * math.exp(-4.0 * (1.0 - up_z)),
             "hold": c.hold_weight * is_up * at_height * math.exp(-0.5 * float(np.sum(action**2))),
+            "stance": c.stance_weight * calm * float(np.mean(feet_down)),
         }
         total = float(sum(terms.values()))
         return (max(total, 0.0) if c.reward_floor else total), terms

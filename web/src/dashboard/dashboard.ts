@@ -8,6 +8,7 @@ import type { CheckpointInfo, RunDetail, RunSummary, ScalarSeries } from "../pro
 import { formatSteps, LineChart, type ChartOptions, type ChartSeries } from "./linechart";
 
 const SERIES_SLOTS = 8; // categorical palette size (dashboard.css --series-1..8)
+const SKILL_TEST = "v2"; // runs.SKILL_TEST_VERSION: skill results of other versions count as not evaluated
 const POLL_MS = 10_000; // runs list + curves of running runs
 const EVAL_POLL_MS = 2_000; // while checkpoints are being evaluated
 
@@ -353,7 +354,7 @@ export class Dashboard {
     head.replaceChildren(title, meta);
 
     const best = bestCheckpoint(d.checkpoints);
-    const skillName = s.task === "getup" ? "Get-up test" : "Shove test";
+    const skillName = s.task === "getup" ? "Get-up test" : "Push test";
     const seconds = duration(s.started, s.finished);
     tiles.replaceChildren(
       tile("Steps", `${formatSteps(s.steps_done)}`, `of ${formatSteps(s.total_steps)} planned`),
@@ -395,7 +396,10 @@ export class Dashboard {
     head.className = "section-head";
     const h = document.createElement("h3");
     h.textContent = "Checkpoints";
-    const missing = d.checkpoints.filter((c) => c.evaluation === null || c.evaluation.skill === null).length;
+    // Not evaluated, or with an older skill test (runs.SKILL_TEST_VERSION): re-run those.
+    const missing = d.checkpoints.filter(
+      (c) => c.evaluation === null || c.evaluation.skill === null || !c.evaluation.skill_test.startsWith(SKILL_TEST + ":"),
+    ).length;
     const button = document.createElement("button");
     button.textContent =
       d.evaluating > 0
@@ -416,7 +420,8 @@ export class Dashboard {
     const skillHelp =
       d.summary.task === "getup"
         ? "Get-up test: 24 hard fallen starts (8 upside down with the legs anywhere); passed if standing steady within 10 s."
-        : "Shove test: 32 sudden shoves (1 and 2 m/s, 16 directions); passed if still up 3 s later.";
+        : "Push test: 32 pushes like the viewer's (72 and 144 N for 0.1 s on the torso's side, 16 directions); " +
+          "passed if still up 3 s later.";
     note.textContent =
       "Measured headless without exploration noise. Best = highest skill. " + skillHelp +
       " Gait: a walk keeps each foot down more than half the time and never has all four in the air.";
@@ -434,7 +439,7 @@ export class Dashboard {
     const header = table.createTHead().insertRow();
     for (const [label, help] of [
       ["Checkpoint", ""],
-      [d.summary.task === "getup" ? "Get-up test" : "Shove test", "The task's skill test: share passed (see above)"],
+      [d.summary.task === "getup" ? "Get-up test" : "Push test", "The task's skill test: share passed (see above)"],
       ["Speed", "Average forward speed"],
       ["Distance", "Meters walked forward per episode"],
       ["Falls", "Episodes that ended with the robot falling over"],

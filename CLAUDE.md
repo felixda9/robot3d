@@ -844,6 +844,29 @@ web/                    Vite + TypeScript + three.js frontend
   at the back (roll 9° out on the left legs, rear hips 20° back vs
   6–8° / 8–14°): the braced stance robust walkers tend to take.
   Skill-test "best": getup12_v3 50M (100%), stand12_v3 47.6M (78%).
+- **2026-09-25: Stand policy vs the viewer's pushes** (user: "not in the home
+  configuration, one of its legs is a bit in the air, and it still falls
+  when I push it with 60 N from the side"; also "a lot more stable when
+  walking than when standing"). Measured on stand12_v3 47.6M:
+  - at rest the front-left foot hovers 49 mm up: a three-legged stance
+    (my stillness check averaged joint offsets and missed it);
+  - a viewer push is a force at a point: 60 N on the upper side edge for
+    0.1 s → 0.8 m/s sideways *and* 143 °/s of roll. The training kicks
+    (velocity at the center of mass, no spin) were far easier. Viewer-
+    style pushes at the upper edge, 8 directions: 40 N 8/8, 60 N 5/8,
+    80 N 4/8, 100 N 3/8, 150 N 0/8. (walk12_robust trained with harder
+    kicks + spin, hence "more stable walking".)
+  Changes:
+  - `push_kind` "force" (stand default): training pushes = viewer pushes
+    (WalkTask.push_wrench / BatchedWalkTask.push_wrench, xfrc_applied on
+    the torso for 0.1 s at a point on its side facing the pusher, 0–100%
+    of its half-height up). Size still in m/s of impulse for the whole
+    robot (1 m/s ≈ 72 N), so the curriculum (to 3 m/s ≈ 216 N) is the same.
+  - `stance` reward (stand 1.0): share of feet down, while calm.
+  - Skill test v2 (`runs.SKILL_TEST_VERSION`): walk/stand are pushed like
+    the viewer (72 and 144 N, halfway up the side, 16 directions);
+    evaluations with another version count as not evaluated.
+  → `stand12_push`: stand12_v3 47.6M fine-tuned 60M steps.
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -890,7 +913,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 138 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 142 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after

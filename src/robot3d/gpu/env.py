@@ -96,6 +96,9 @@ class GpuWalkEnv:
         self.qvel = wp.to_torch(d.qvel)  # (N, nv)
         self.ctrl = wp.to_torch(d.ctrl)  # (N, nu)
         self.xmat = wp.to_torch(d.xmat)  # (N, nbody, 3, 3)
+        self.xpos = wp.to_torch(d.xpos)  # (N, nbody, 3) body frame origins
+        self.xipos = wp.to_torch(d.xipos)  # (N, nbody, 3) body centers of mass
+        self.xfrc = wp.to_torch(d.xfrc_applied)  # (N, nbody, 6) external force + torque (force pushes)
         self.geom_xpos = wp.to_torch(d.geom_xpos)  # (N, ngeom, 3)
         self.power = wp.to_torch(self._power)  # (N,)
         self.reset_mask = wp.to_torch(self._reset_mask)  # (N,)
@@ -110,6 +113,8 @@ class GpuWalkEnv:
         c = self.task.config
         # Each robot's current max shove (m/s): push_max_speed, or its curriculum level.
         self.push_level = torch.full((num_envs,), c.push_max_speed, device=self.device)
+        self.push_left = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # control steps of force push left
+        self._push_steps = round(self.task.task.PUSH_SECONDS / self.task.control_dt)
         # Foot x/y and on-ground at the end of the last step (for slip, and
         # as "was down" for landings), and each foot's time in the air.
         self._feet_before: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -185,18 +190,32 @@ class GpuWalkEnv:
             # Shoves (see WalkConfig.push_interval), without a GPU->CPU sync:
             # every robot draws a kick, only those due get it.
             due = self.episode_length >= self.next_push
-            if c.push_direction == "circle":
+            if c.push_kind == "force":
+                angle = 2 * torch.pi * torch.rand(self.num_envs, generator=self.generator, device=self.device)
+                size = torch.rand(self.num_envs, generator=self.generator, device=self.device) * self.push_level
+                height = torch.rand(self.num_envs, generator=self.generator, device=self.device)
+                force, torque = task.push_wrench(self.xmat[:, 1], self.xpos[:, 1], self.xipos[:, 1],
+                                                 angle, size, height)
+                wrench = torch.cat([force, torque], dim=1)
+                self.xfrc[:, 1] = torch.where(due[:, None], wrench, self.xfrc[:, 1])
+                self.push_left = torch.where(due, torch.full_like(self.push_left, self._push_steps + 1),
+                                             self.push_left)
+            elif c.push_direction == "circle":
                 angle = 2 * torch.pi * torch.rand(self.num_envs, generator=self.generator, device=self.device)
                 size = torch.rand(self.num_envs, generator=self.generator, device=self.device) * self.push_level
                 kick = torch.stack([angle.cos(), angle.sin()], dim=1) * size[:, None]
             else:
                 kick = (2 * torch.rand((self.num_envs, 2), generator=self.generator, device=self.device) - 1)
                 kick = kick * c.push_max_speed
-            self.qvel[:, 0:2] += kick * due[:, None]
+            if c.push_kind != "force":
+                self.qvel[:, 0:2] += kick * due[:, None]
             if c.push_max_spin > 0:
                 spin = 2 * torch.rand((self.num_envs, 3), generator=self.generator, device=self.device) - 1
                 self.qvel[:, 3:6] += spin * c.push_max_spin * due[:, None]
             self.next_push = torch.where(due, self.episode_length + self._push_delays(self.num_envs), self.next_push)
+        if c.push_kind == "force":  # a force push acts for _push_steps control steps, then stops
+            self.push_left = (self.push_left - 1).clamp(min=0)
+            self.xfrc[:, 1] *= (self.push_left > 0).float()[:, None]
         x_before = self.qpos[:, 0].clone()
         y_before = self.qpos[:, 1].clone()
         self.power.zero_()
@@ -287,6 +306,8 @@ class GpuWalkEnv:
         self.episode_return[mask] = 0.0
         self.start_xy[mask] = self.qpos[mask, 0:2]
         self.steady_steps[mask] = 0
+        self.push_left[mask] = 0
+        self.xfrc[mask] = 0.0
         self.next_push[mask] = self._push_delays(self.num_envs)[mask]
 
     def _distance(self, displacement: torch.Tensor) -> torch.Tensor:

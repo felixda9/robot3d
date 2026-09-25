@@ -71,8 +71,10 @@ def test_evaluation_cache(tiny_run):
     from robot3d.runs import needs_evaluation
 
     assert needs_evaluation(checkpoint)
-    info = save_evaluation(checkpoint, results, {"skill": 0.75, "skill_test": "shoves"})
-    assert (info.skill, info.skill_test) == (0.75, "shoves") and not needs_evaluation(checkpoint)
+    save_evaluation(checkpoint, results, {"skill": 0.75, "skill_test": "shoves"})  # an older skill test (v1)
+    assert needs_evaluation(checkpoint)
+    info = save_evaluation(checkpoint, results, {"skill": 0.75, "skill_test": "v2: pushes"})
+    assert (info.skill, info.skill_test) == (0.75, "v2: pushes") and not needs_evaluation(checkpoint)
     checkpoint.eval_path.unlink()
     assert checkpoint.evaluation() is None
 

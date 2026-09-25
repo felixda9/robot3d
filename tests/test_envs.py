@@ -360,6 +360,50 @@ def test_shoves_come_from_every_direction_with_a_twist():
     assert np.abs(np.array(spins)).max() > 0.2  # twisted too
 
 
+def test_force_pushes_act_like_the_viewers():
+    """A force push on the torso's side for 0.1 s: same as Simulation.push."""
+    from robot3d.simulation import Simulation
+    from robot3d.walk import WalkConfig
+
+    env = WalkEnv("quadruped12", WalkConfig(push_interval=0.0))
+    env.reset(seed=0)
+    for _ in range(50):
+        env.step(np.zeros(12))
+    env.push(np.pi / 2, 1.0, height=1.0)  # toward +y (hits the -y side), 1 m/s worth, at the top edge
+    force = env.data.xfrc_applied[1, :3].copy()
+    assert force == pytest.approx([0, env.task.robot_mass / 0.1, 0], abs=1e-6)  # 1 m/s x 7.2 kg / 0.1 s = 72 N
+    for k in range(5):
+        env.step(np.zeros(12))
+        assert env.data.xfrc_applied[1].any()  # on for 5 control steps = 0.1 s
+    vy, roll_rate = env.data.qvel[1], env.data.qvel[3]
+    env.step(np.zeros(12))
+    assert not env.data.xfrc_applied.any()  # then off
+    assert 0.4 < vy < 1.0  # most of the 1 m/s (the feet hold back a little)
+    # and it tips: the top edge is pushed toward +y, so it rolls about -x (right-hand rule)
+    assert roll_rate < -1.0
+
+    # The same push in the viewer's Simulation gives about the same motion.
+    sim = Simulation("quadruped12")
+    for _ in range(round(1.0 / sim.model.opt.timestep)):
+        sim.step()
+    point = [0.0, -env.task.torso_half_size[1], env.task.torso_half_size[2]]
+    sim.push(sim.model.geom("torso").id, point, [0, 1, 0], env.task.robot_mass / 0.1)
+    for _ in range(round(0.1 / sim.model.opt.timestep)):
+        sim.step()
+    assert sim.data.qvel[1] == pytest.approx(vy, abs=0.25) and sim.data.qvel[3] == pytest.approx(roll_rate, rel=0.4)
+
+
+def test_stance_reward_wants_all_feet_down():
+    from robot3d.walk import WalkConfig
+
+    stand = WalkEnv("quadruped", WalkConfig.stand()).task
+    c = stand.config
+    assert reward_terms(stand, feet_down=(1, 1, 1, 1))["stance"] == pytest.approx(c.stance_weight)
+    assert reward_terms(stand, feet_down=(1, 1, 1, 0))["stance"] == pytest.approx(0.75 * c.stance_weight)
+    assert reward_terms(stand, vx=0.8, feet_down=(1, 0, 0, 1))["stance"] == 0.0  # shoved along: step freely
+    assert reward_terms(WalkEnv("quadruped").task)["stance"] == 0.0  # walking: no
+
+
 def test_gait_rules_pause_while_knocked_off_speed(env):
     c = env.task.config
     assert c.constraint_gate_speed_error == 0.5

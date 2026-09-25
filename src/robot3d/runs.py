@@ -207,10 +207,17 @@ def run_task(info: dict) -> str:
     return walk.get("task") or ("getup" if walk.get("terminate_on_fall") is False else "walk")
 
 
+# policy.skill_test's version: evaluations with another (or no) skill test
+# count as not evaluated, so "best" compares like with like. v2: viewer-style
+# force pushes instead of v1's velocity kicks.
+SKILL_TEST_VERSION = "v2"
+
+
 def needs_evaluation(checkpoint: Checkpoint) -> bool:
-    """Not evaluated yet, or evaluated before the skill test existed."""
+    """Not evaluated yet, or evaluated with an older (or no) skill test."""
     evaluation = checkpoint.evaluation()
-    return evaluation is None or evaluation.skill is None
+    return (evaluation is None or evaluation.skill is None
+            or not evaluation.skill_test.startswith(SKILL_TEST_VERSION + ":"))
 
 
 def run_summary(run_dir: Path) -> RunSummary:

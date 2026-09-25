@@ -50,6 +50,7 @@ class WalkEnv(gym.Env):
         self._start_xy = self.data.qpos[0:2].copy()
         self._next_push = self._push_delay()
         self._steady_steps = 0
+        self._push_left = 0  # control steps left of a force push
         self._feet_down = self.task.feet_state(self.data)[1]
         self._air_time = np.zeros(len(self.task.feet))
         return self.task.observation(self.data, self._last_action, self.task.gait_phase(0)), {}
@@ -60,7 +61,12 @@ class WalkEnv(gym.Env):
         data.ctrl[:] = task.action_to_ctrl(action, data.qpos[task.joint_qpos])
 
         c = task.config
-        if c.push_interval > 0 and self._steps >= self._next_push:
+        if c.push_interval > 0 and self._steps >= self._next_push and c.push_kind == "force":
+            # A push like the viewer's (see WalkConfig.push_kind).
+            self.push(self.np_random.uniform(0, 2 * np.pi), self.np_random.uniform(0, c.push_max_speed),
+                      self.np_random.uniform(0.0, 1.0))
+            self._next_push = self._steps + self._push_delay()
+        elif c.push_interval > 0 and self._steps >= self._next_push:
             # A shove: the torso's horizontal velocity (free joint qvel[0:2],
             # world frame) jumps, as if bumped into (see WalkConfig.push_interval).
             if c.push_direction == "circle":
@@ -72,6 +78,11 @@ class WalkEnv(gym.Env):
             if c.push_max_spin > 0:  # and a twist (qvel[3:6]: torso angular velocity, its own frame)
                 data.qvel[3:6] += self.np_random.uniform(-c.push_max_spin, c.push_max_spin, 3)
             self._next_push = self._steps + self._push_delay()
+
+        if self._push_left > 0:
+            self._push_left -= 1
+        elif data.xfrc_applied[1].any():
+            data.xfrc_applied[1] = 0.0  # the push is over
 
         x_before, y_before = data.qpos[0], data.qpos[1]
         feet_before = task.feet_state(data)
@@ -121,6 +132,16 @@ class WalkEnv(gym.Env):
             **{f"reward_{name}": value for name, value in terms.items()},
         }
         return observation, reward, terminated, truncated, info
+
+    def push(self, angle: float, size: float, height: float) -> None:
+        """Start a viewer-like force push on the torso (WalkTask.push_wrench):
+        it acts for the next PUSH_SECONDS of control steps."""
+        data = self.data
+        force, torque = self.task.push_wrench(data.xmat[1].reshape(3, 3), data.xpos[1], data.xipos[1],
+                                              angle, size, height)
+        data.xfrc_applied[1, :3] = force
+        data.xfrc_applied[1, 3:] = torque
+        self._push_left = round(self.task.PUSH_SECONDS / self.task.control_dt)
 
     def _push_delay(self) -> int:
         return self.task.push_delay(self.np_random.uniform()) if self.task.config.push_interval > 0 else 0
