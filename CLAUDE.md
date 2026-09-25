@@ -159,7 +159,7 @@ web/                    Vite + TypeScript + three.js frontend
   stand upright and not fall in any circumstance, even get back up if it
   fell", tested by grabbing and pushing the robot with the mouse):
   1. [x] Mouse grab + push in the viewer, push force adjustable.
-  2. [ ] (built, training) A 12-motor robot (a sideways hip joint per leg, like real robot
+  2. [x] A 12-motor robot (a sideways hip joint per leg, like real robot
      dogs; user's choice, since the 8-motor legs can't roll it back over
      from its side), trained to walk while being shoved at random.
   3. [ ] A **stand** policy (stays upright in place, steps to catch shoves,
@@ -692,6 +692,18 @@ web/                    Vite + TypeScript + three.js frontend
      2.8 the same motion flips it onto its belly (checked in simulation).
      Walkers stay far from the limits (±0.5 rad around home).
   → `stand12_reach` (80M steps).
+- **2026-09-25: `walk12_tidy` result** (quadruped12, 1.5 Hz clock, shoves,
+  heading-frame speed + turn reward + roll penalty; 50M steps): every
+  checkpoint from 10M on walks with 0 falls (evaluated with shoves on); at
+  50M 0.39 m/s, feet down 56%, diagonal sync 0.96, 1.58 steps/s,
+  straight (0.1 °/s). Roll: 0–8° held out, 3–4° swing (walk12_straight:
+  16–19°, 6–9°); slightly asymmetric still (left legs 6–8° out, rear
+  hips differ). **Shove survival** (scratchpad push_survival.py: walk 3 s,
+  one shove from each of 16 directions, still up 3 s later):
+  | shove (m/s) | 0.5 | 1.0 | 1.5 | 2.0 | 2.5 | 3.0 |
+  | trot_clock_15 (8 motors, never shoved) | 100% | 81% | 31% | 12% | 0% | 0% |
+  | walk12_tidy | 100% | 100% | 93% | 81% | 62% | 18% |
+  (1 m/s ≈ 70 N on the viewer's push slider.)
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -713,12 +725,12 @@ web/                    Vite + TypeScript + three.js frontend
   and tested. `walk12_push` walked in circles (world-frame speed reward);
   `walk12_straight` went straight but splayed its legs (roll). Walk /
   Stand modes with the automatic switch are built and tested. Training now,
-  side by side on the GPU: `walk12_tidy` (+ roll penalty) and
-  `stand12_reach` (the stand task, 80M steps; earlier stand runs learned to
-  lie still, then couldn't reach the floor from their back). Then measure how hard a shove each survives (scratchpad
-  push_survival: 16 directions per strength) vs trot_clock_15, never
-  shoved in training: 100% at 0.5 m/s, 81% at 1.0, 31% at 1.5, 12% at 2.0,
-  0% from 2.5 m/s.
+  `walk12_tidy` (+ roll penalty) is done: straight, mostly tidy, and far
+  more shove-proof (see Decisions); waiting for the user's verdict on its
+  look. `stand12_reach` (the stand task, 80M steps; earlier stand runs
+  learned to lie still, then couldn't reach the floor from their back) is
+  training: at 10M it stays up (8/8) and gets up from its belly (9/11), not
+  yet from its back (0/35), but time on its back is dropping fast.
 - `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
   - 0 KL spikes (walk_10m: 114, max 50.5);
   - steady 1.0–1.28 m/s after 3M steps;
