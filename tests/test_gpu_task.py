@@ -107,7 +107,8 @@ def test_action_to_ctrl_and_reward_match(snapshots):
         "feet_down": rng.random((N, nfeet)) < 0.6, "landed": rng.random((N, nfeet)) < 0.3,
         "air_time": rng.uniform(0, 0.8, (N, nfeet)), "foot_height": rng.uniform(-0.001, 0.06, (N, nfeet)),
         "phase": np.array([task.gait_phase(int(s)) for s in rng.integers(0, 1000, N)]),
-        "turn_rate": rng.uniform(-2, 2, N),
+        "turn_rate": rng.uniform(-2, 2, N), "height": rng.uniform(0.0, 0.35, N),
+        "joint_offset": rng.uniform(-1, 1, (N, task.num_actions)),
     }
     booleans = ("fell", "feet_down", "landed")
     dtypes = {k: torch.bool for k in booleans} | {"phase": torch.float64}
@@ -160,6 +161,43 @@ def test_air_time_update_matches(snapshots):
         expected = task.air_time_update(prev[i], air[i], down[i])
         for g, e in zip(got, expected):
             np.testing.assert_allclose(g[i].numpy(), e, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("robot, stand", [("quadruped", True), ("quadruped12", True), ("quadruped12", False)])
+def test_reward_matches_for_other_tasks_and_robots(robot, stand):
+    """The stand task, and the 12-motor robot (roll penalty)."""
+    from robot3d.walk import WalkConfig, WalkTask
+
+    task = WalkTask(WalkEnv(robot).model, WalkConfig.stand() if stand else WalkConfig())
+    batched = BatchedWalkTask(task, "cpu")
+    rng = np.random.default_rng(4)
+    nfeet = len(task.feet)
+    inputs = {
+        "vx": rng.uniform(-0.5, 0.5, N), "vy": rng.uniform(-0.5, 0.5, N), "motor_power": rng.uniform(0, 80, N),
+        "action": rng.uniform(-1, 1, (N, task.num_actions)), "last_action": rng.uniform(-1, 1, (N, task.num_actions)),
+        "up_z": rng.uniform(-1, 1, N), "fell": rng.random(N) < 0.5, "foot_slip": rng.uniform(0, 0.5, N),
+        "feet_down": rng.random((N, nfeet)) < 0.6, "landed": rng.random((N, nfeet)) < 0.3,
+        "air_time": rng.uniform(0, 0.8, (N, nfeet)), "foot_height": rng.uniform(-0.001, 0.06, (N, nfeet)),
+        "phase": np.zeros(N), "turn_rate": rng.uniform(-2, 2, N), "height": rng.uniform(0.0, 0.35, N),
+        "joint_offset": rng.uniform(-1, 1, (N, task.num_actions)),
+    }
+    dtypes = {"fell": torch.bool, "feet_down": torch.bool, "landed": torch.bool, "phase": torch.float64}
+    rewards, terms = batched.reward(**{k: torch.tensor(v, dtype=dtypes.get(k, torch.float32)) for k, v in inputs.items()})
+    for i in range(N):
+        r, t = task.reward(**{k: v[i] for k, v in inputs.items()})
+        assert rewards[i].item() == pytest.approx(r, rel=1e-5, abs=1e-5)
+        for name, value in t.items():
+            assert terms[name][i].item() == pytest.approx(value, rel=1e-5, abs=1e-5), name
+
+
+def test_fallen_starts_on_the_gpu_side():
+    from robot3d.walk import WalkConfig, WalkTask
+
+    task = WalkTask(WalkEnv("quadruped12").model, WalkConfig.stand())
+    batched = BatchedWalkTask(task, "cpu")
+    qpos, _ = batched.reset_state(400, torch.Generator().manual_seed(0))
+    from_bank = (qpos[:, None, :] == batched.fallen_qpos[None]).all(dim=2).any(dim=1)
+    assert 0.4 < from_bank.float().mean().item() < 0.6
 
 
 def test_reset_state_noise(snapshots):

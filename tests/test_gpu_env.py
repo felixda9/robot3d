@@ -38,7 +38,7 @@ def put_cpu_state_into_world(gpu_env, world, cpu_env):
     gpu_env.last_action[world] = 0.0
     gpu_env.air_time[world] = 0.0
     gpu_env.episode_length[world] = 0
-    gpu_env.start_x[world] = gpu_env.qpos[world, 0]
+    gpu_env.start_xy[world] = gpu_env.qpos[world, 0:2]
     xy, down = gpu_env.task.feet_state(gpu_env.geom_xpos)
     gpu_env._feet_before[0][world] = xy[world]
     gpu_env._feet_before[1][world] = down[world]

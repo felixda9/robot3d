@@ -4,6 +4,7 @@
     uv run scripts/train_gpu.py --trainer rsl            # RSL-RL's PPO (legged_gym recipe)
     uv run scripts/train_gpu.py --steps 1e8 --envs 8192 --name fast_walk
     uv run scripts/train_gpu.py --gait-hz 1.5            # slower stepping rhythm (0 = no gait clock)
+    uv run scripts/train_gpu.py --task stand --robot quadruped12   # stand, catch shoves, get up
 
 Needs an NVIDIA GPU and the CUDA build of PyTorch. Watch it in the web UI's
 Training tab (same metrics as CPU runs); replay any checkpoint from there, or
@@ -12,6 +13,7 @@ Ctrl+C stops early and still saves a final checkpoint.
 """
 
 import argparse
+import dataclasses
 
 import torch
 
@@ -26,6 +28,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--trainer", choices=["ppo", "rsl"], default="ppo",
                         help="ppo = our PPO (gpu/ppo.py); rsl = RSL-RL's reference PPO (gpu/rsl.py)")
+    parser.add_argument("--task", choices=["walk", "stand"], default="walk",
+                        help="walk: the trot-walk; stand: stay upright in place, catch shoves, get up after falls")
     parser.add_argument("--robot", default="quadruped", choices=available_robots())
     parser.add_argument("--steps", type=float, default=50e6, help="total environment steps (e.g. 5e7)")
     parser.add_argument("--envs", type=int, default=4096, help="robots simulated in parallel")
@@ -43,13 +47,15 @@ def main() -> None:
             "PyTorch can't see a CUDA GPU. GPU training needs an NVIDIA GPU and the CUDA build of "
             "PyTorch (see pyproject.toml, [tool.uv.sources])."
         )
-    suffix = "walk_rsl" if args.trainer == "rsl" else "walk_gpu"
+    suffix = f"{args.task}_rsl" if args.trainer == "rsl" else f"{args.task}_gpu"
     name = args.name or default_run_name(args.robot, suffix)
     print(f"Run folder: {RUNS_DIR / name}")
     print(f"Training {args.robot} with {args.trainer} for {int(args.steps):,} steps, {args.envs:,} robots on "
           f"{torch.cuda.get_device_name(0)}. First steps compile GPU kernels (~30 s, cached after).\n")
     overrides = {k: v for k, v in (("epochs", args.epochs), ("minibatches", args.minibatches)) if v is not None}
-    walk = WalkConfig() if args.gait_hz is None else WalkConfig(gait_frequency=args.gait_hz)
+    walk = WalkConfig.stand() if args.task == "stand" else WalkConfig()
+    if args.gait_hz is not None:
+        walk = dataclasses.replace(walk, gait_frequency=args.gait_hz)
     common = dict(robot=args.robot, total_steps=int(args.steps), name=name, seed=args.seed,
                   checkpoint_every=int(args.checkpoint_every), walk=walk)
     if args.trainer == "rsl":

@@ -43,7 +43,11 @@ class BatchedWalkTask:
         self.pair_b = tensor([b for _, b in pairs], torch.long)
         self.has_pairs = bool(task.diagonal_pairs)
         self.clock = task.clock
+        self.roll_motors = tensor(task.roll_motors, torch.long)
         self.foot_phase_offset = tensor(task.foot_phase_offset, torch.float64)
+        if self.config.fallen_start_fraction > 0:
+            fallen_qpos, fallen_qvel = task.fallen_states
+            self.fallen_qpos, self.fallen_qvel = tensor(fallen_qpos), tensor(fallen_qvel)
 
     # ----------------------------------------------------------------- actions
 
@@ -110,6 +114,8 @@ class BatchedWalkTask:
         foot_height: torch.Tensor,
         phase: torch.Tensor,
         turn_rate: torch.Tensor,
+        height: torch.Tensor,
+        joint_offset: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """(N,) rewards and (N,) per-term values, same terms as WalkTask.reward.
         feet_down, landed: (N, feet) bool; air_time, foot_height: (N, feet);
@@ -142,7 +148,11 @@ class BatchedWalkTask:
             "smoothness": -c.smoothness_weight * ((action - last_action) ** 2).sum(dim=1),
             "slip": -c.slip_weight * foot_slip,
             "support": -c.support_weight * (feet_down.sum(dim=1) < 2).float(),
-            "fall": -c.fall_penalty * fell.float(),
+            "fall": -c.fall_penalty * fell.float() * float(c.terminate_on_fall),
+            "height": c.height_weight * (height / self.standing_height).clamp(0.0, 1.0),
+            "pose": c.pose_weight * torch.exp(-(joint_offset**2).sum(dim=1) / c.pose_sigma),
+            "down": -c.down_weight * fell.float(),
+            "roll": -c.roll_weight * (joint_offset[:, self.roll_motors] ** 2).sum(dim=1),
         }
         return torch.stack(list(terms.values())).sum(dim=0), terms
 
@@ -198,4 +208,9 @@ class BatchedWalkTask:
         qpos[:, self.joint_qpos] += (2 * joint_noise - 1) * c.reset_joint_noise
         vel_noise = torch.rand(qvel.shape, generator=generator, device=self.device)
         qvel += (2 * vel_noise - 1) * c.reset_velocity_noise
+        if c.fallen_start_fraction > 0:  # some start lying down (WalkTask.fallen_states)
+            fallen = torch.rand(n, generator=generator, device=self.device) < c.fallen_start_fraction
+            pick = torch.randint(len(self.fallen_qpos), (n,), generator=generator, device=self.device)
+            qpos = torch.where(fallen[:, None], self.fallen_qpos[pick], qpos)
+            qvel = torch.where(fallen[:, None], self.fallen_qvel[pick], qvel)
         return qpos, qvel

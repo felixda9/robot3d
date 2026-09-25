@@ -211,6 +211,7 @@ class EvaluationInfo(_Message):
     airborne: float | None = None
     diagonal_sync: float | None = None
     cadence: float | None = None
+    upright: float | None = None
 
 
 class CheckpointInfo(_Message):

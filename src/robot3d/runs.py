@@ -126,6 +126,7 @@ def save_evaluation(checkpoint: Checkpoint, results: list[dict]) -> EvaluationIn
         airborne=mean_of("airborne"),
         diagonal_sync=mean_of("diagonal_sync"),
         cadence=mean_of("cadence"),
+        upright=mean_of("upright"),
     )
     checkpoint.eval_path.write_text(info.model_dump_json(indent=2) + "\n")
     return info

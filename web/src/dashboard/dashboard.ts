@@ -75,22 +75,30 @@ const CURVES: CurveChart[] = [
 ];
 
 // Reward terms of the selected run, one line per term (fixed order = fixed
-// colors), split in two charts so neither has more than 8 lines. Runs only
-// log the terms their task has (e.g. old runs: no tracking/trot/air_time).
+// colors), in three charts so none has more than 8 lines. Terms that are 0
+// for the whole run (switched off for its task) aren't drawn, and older runs
+// don't have the newer terms at all.
 interface TermChart extends ChartOptions {
   terms: string[];
 }
 
 const TERM_CHARTS: TermChart[] = [
   {
-    terms: ["tracking", "forward", "upright", "gait", "clearance", "turn", "trot", "air_time"],
-    title: "Rewards (+)",
-    subtitle: "What the selected run is rewarded for, average per step.",
+    terms: ["tracking", "forward", "gait", "clearance", "turn", "trot", "air_time"],
+    title: "Rewards: moving",
+    subtitle: "What the selected run is rewarded for about how it moves, average per step.",
     format: fixed(3),
     tickFormat: fixed(2),
   },
   {
-    terms: ["energy", "smoothness", "slip", "support", "fall"],
+    terms: ["upright", "height", "pose"],
+    title: "Rewards: posture",
+    subtitle: "Rewards for staying up: level torso, standing height, standing pose.",
+    format: fixed(3),
+    tickFormat: fixed(2),
+  },
+  {
+    terms: ["energy", "smoothness", "slip", "support", "roll", "fall", "down"],
     title: "Penalties (−)",
     subtitle: "What the selected run is penalized for, average per step. Closer to 0 is better.",
     format: fixed(3),
@@ -309,7 +317,7 @@ export class Dashboard {
       chart.setSeries(
         c.terms.flatMap((term, slot) => {
           const s = terms?.get(`reward/${term}`);
-          return s ? [toSeries(term, term, slot + 1, s)] : [];
+          return s && s.values.some((v) => v !== 0) ? [toSeries(term, term, slot + 1, s)] : [];
         }),
       );
       chart.element.querySelector("h3")!.textContent = this.selected ? `${c.title}: ${this.selected}` : c.title;
@@ -417,6 +425,7 @@ export class Dashboard {
       ["Speed", "Average forward speed"],
       ["Distance", "Meters walked forward per episode"],
       ["Falls", "Episodes that ended with the robot falling over"],
+      ["Upright", "Share of the time not fallen (standing policies: including getting up after fallen starts)"],
       ["Mean return", "Total reward per episode"],
       ["Feet down", "Share of time each foot is on the ground (duty factor). Walk: over 50%, run: under 50%"],
       ["Airborne", "Share of time all four feet are in the air. A walk: 0%"],
@@ -446,6 +455,7 @@ export class Dashboard {
       row.insertCell().textContent = e ? `${e.speed.toFixed(2)} m/s` : "–";
       row.insertCell().textContent = e ? `${e.distance.toFixed(1)} m` : "–";
       row.insertCell().textContent = e ? `${e.falls}/${e.episodes}` : "–";
+      row.insertCell().textContent = percent(e?.upright);
       row.insertCell().textContent = e ? e.mean_return.toFixed(0) : "–";
       row.insertCell().textContent = percent(e?.duty_factor);
       row.insertCell().textContent = percent(e?.airborne);

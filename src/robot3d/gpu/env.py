@@ -102,7 +102,7 @@ class GpuWalkEnv:
         self.last_action = torch.zeros((num_envs, self.num_actions), device=self.device)
         self.episode_length = torch.zeros(num_envs, dtype=torch.long, device=self.device)
         self.episode_return = torch.zeros(num_envs, device=self.device)
-        self.start_x = torch.zeros(num_envs, device=self.device)
+        self.start_xy = torch.zeros((num_envs, 2), device=self.device)
         self.next_push = torch.zeros(num_envs, dtype=torch.long, device=self.device)  # episode step of the next shove
         # Foot x/y and on-ground at the end of the last step (for slip, and
         # as "was down" for landings), and each foot's time in the air.
@@ -204,13 +204,15 @@ class GpuWalkEnv:
             feet_down=feet_down, landed=landed, air_time=air_at_landing,
             foot_height=task.foot_heights(self.geom_xpos),
             phase=task.gait_phase(self.episode_length + 1),  # the clock after this step
-            turn_rate=task.turn_rate(self.qvel),
+            turn_rate=task.turn_rate(self.qvel), height=self.qpos[:, 2],
+            joint_offset=self.qpos[:, task.joint_qpos] - task.home_ctrl,
         )
         self.last_action = actions
         self.episode_length += 1
         self.episode_return += reward
-        time_out = (self.episode_length >= task.max_steps) & ~fell
-        done = fell | time_out
+        terminated = fell & task.config.terminate_on_fall  # standing: no; it has to get up
+        time_out = (self.episode_length >= task.max_steps) & ~terminated
+        done = terminated | time_out
 
         result = StepResult(
             obs=self.observe(),
@@ -220,8 +222,8 @@ class GpuWalkEnv:
             terms=terms,
             episode_return=self.episode_return[done].clone(),
             episode_length=self.episode_length[done].clone(),
-            episode_distance=(self.qpos[done, 0] - self.start_x[done]).clone(),
-            episode_fell=fell[done].clone(),
+            episode_distance=self._distance(self.qpos[done, 0:2] - self.start_xy[done]),
+            episode_fell=terminated[done].clone(),
         )
         self._feet_before = feet_after
         if done.any():
@@ -253,8 +255,14 @@ class GpuWalkEnv:
         self.air_time[mask] = 0.0
         self.episode_length[mask] = 0
         self.episode_return[mask] = 0.0
-        self.start_x[mask] = self.qpos[mask, 0]
+        self.start_xy[mask] = self.qpos[mask, 0:2]
         self.next_push[mask] = self._push_delays(self.num_envs)[mask]
+
+    def _distance(self, displacement: torch.Tensor) -> torch.Tensor:
+        """Like WalkTask.distance, for (n, 2) displacements."""
+        if self.task.config.velocity_frame == "world":
+            return displacement[:, 0].clone()
+        return displacement.norm(dim=1)
 
     def _push_delays(self, n: int) -> torch.Tensor:
         """(n,) control steps until the next push, like WalkTask.push_delay."""

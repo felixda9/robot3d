@@ -77,8 +77,9 @@ class PolicyController:
         self.steps = 0
 
     def reset_state(self, data: mujoco.MjData) -> None:
-        """Start like a training episode: standing, with the same small noise."""
-        self.task.reset_state(data, self._rng)
+        """Start like a training episode: standing, with the same small noise
+        (always standing, even for a policy that trained starting fallen too)."""
+        self.task.reset_state(data, self._rng, allow_fallen=False)
 
     def action(self, data: mujoco.MjData) -> np.ndarray:
         """The policy's action (-1..1 per motor) for the current state."""
@@ -108,11 +109,13 @@ def evaluate(checkpoint: Checkpoint, episodes: int = 5, seed: int = 0) -> list[d
         controller.reset()
         total, steps = 0.0, 0
         feet_down = []  # per step: which feet are on the ground
+        upright_steps = 0
         while True:
             _, reward, terminated, truncated, step_info = env.step(controller.action(env.data))
             total += reward
             steps += 1
             feet_down.append(task.feet_state(env.data)[1])
+            upright_steps += not step_info["fell"]
             if terminated or truncated:
                 break
         seconds = steps * task.control_dt
@@ -123,6 +126,7 @@ def evaluate(checkpoint: Checkpoint, episodes: int = 5, seed: int = 0) -> list[d
                 "distance": step_info["distance"],
                 "speed": step_info["distance"] / seconds,
                 "fell": terminated,
+                "upright": upright_steps / steps,
                 **gait_numbers(np.array(feet_down[settle_steps:]), task),
             }
         )

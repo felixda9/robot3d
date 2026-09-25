@@ -47,7 +47,7 @@ def test_evaluate_runs_full_episodes(tiny_run):
     for r in results:
         assert 0 < r["seconds"] <= 20.0
         assert set(r) == {
-            "return", "seconds", "distance", "speed", "fell",
+            "return", "seconds", "distance", "speed", "fell", "upright",
             "duty_factor", "airborne", "diagonal_sync", "cadence",
         }
 

@@ -162,8 +162,12 @@ web/                    Vite + TypeScript + three.js frontend
   2. [ ] (built, training) A 12-motor robot (a sideways hip joint per leg, like real robot
      dogs; user's choice, since the 8-motor legs can't roll it back over
      from its side), trained to walk while being shoved at random.
-  3. [ ] A get-up policy plus an automatic switch between it and the walker
-     (user's choice: two policies, like ANYmal's recovery controller).
+  3. [ ] A **stand** policy (stays upright in place, steps to catch shoves,
+     gets back up after falls; the user asked for a stand-only mode to test
+     stability) plus an automatic switch: in Walk mode the walker drives
+     (itself trained with shoves) and the stand policy takes over after a
+     fall until the robot is up (user's choice: two policies, like ANYmal's
+     recovery controller). The viewer gets Stand / Walk modes.
 - [ ] **6. Robot designer:** simple YAML/JSON robot spec (body parts, joints,
   motors) → generated MJCF; then a visual editor in the browser.
 - [ ] **7. Environments & commands:** terrain, stairs, obstacles. Train a policy
@@ -621,6 +625,35 @@ web/                    Vite + TypeScript + three.js frontend
   - Consequence: after a shove turns it, the robot walks straight in its
     new direction; steering back needs a heading target (M7 commands).
   - Episode distance/speed stay along world +x (robots start facing +x).
+- **2026-09-25: `walk12_straight`** (heading-frame speed + turn reward,
+  stopped at ~25M): went straight (0.8 °/s, 0.38 m/s along its nose), but
+  the user saw it "using its roll too much": three legs held 16–19° out,
+  6–9° roll swing per step, lopsided hips (one 25° back). trot_clock_15 is
+  symmetric. → `roll_weight` 1.0: penalty per rad² of roll angle (joints
+  named `<leg>_roll`), legged_gym's "hip_pos"; 0 for the stand task, which
+  needs roll to get up, and for older runs.
+- **2026-09-25: Episode distance** = straight-line distance from the start
+  for heading-frame runs (a robot shoved onto a new heading walks on that
+  way; world-x progress read 0.18 m/s for a 0.38 m/s walker); progress
+  along +x for older runs, so their numbers stay comparable.
+- **2026-09-25: The stand task** (`WalkConfig.stand()`, `train_gpu.py
+  --task stand`): the walk task with standing settings, so the same robot
+  interface, GPU pipeline and viewer work:
+  - target speed 0 (tracking weight 1), no gait clock, turn reward;
+  - new posture terms: `height` (torso height / standing height, capped
+    at 1), `pose` (exp(−Σ(joint − home)² / 1 rad²), weight 0.5), `down`
+    (−1 per step spent fallen); upright weight 1.0;
+  - a fall doesn't end the episode (`terminate_on_fall` off; no one-off
+    fall penalty then); shoves up to 1.5 m/s;
+  - half the episodes start fallen (`fallen_start_fraction` 0.5), from a
+    bank of 128 fallen states made once on first use (~1 s): dropped from
+    0.5 m at a uniformly random orientation with random joint angles,
+    settled 1 s; >70% land fallen. The viewer always resets it standing
+    (`allow_fallen=False`).
+  - All new settings default to "off", so walkers old and new are
+    unchanged. Evaluations get `upright` (share of time not fallen; a new
+    dashboard column). Reward charts: "moving", "posture", "penalties";
+    all-zero terms are hidden.
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -640,8 +673,10 @@ web/                    Vite + TypeScript + three.js frontend
 - Milestone 5c (robustness): step 1 (mouse grab + push) done. Step 2: the
   12-motor robot, random shoves in training and robot switching are built
   and tested. `walk12_push` walked in circles (world-frame speed reward);
-  fixed with heading-frame speed + a turn reward, `walk12_straight` is
-  training. Then: measure how hard a shove it survives (scratchpad
+  `walk12_straight` went straight but splayed its legs (roll). Training
+  now, side by side on the GPU: `walk12_tidy` (+ roll penalty) and
+  `stand12` (the stand task, 80M steps). Next: Stand / Walk modes in the
+  viewer with the automatic switch. Then measure how hard a shove each survives (scratchpad
   push_survival: 16 directions per strength) vs trot_clock_15, never
   shoved in training: 100% at 0.5 m/s, 81% at 1.0, 31% at 1.5, 12% at 2.0,
   0% from 2.5 m/s.
@@ -659,7 +694,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 117 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 124 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after

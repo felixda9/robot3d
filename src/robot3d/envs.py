@@ -47,7 +47,7 @@ class WalkEnv(gym.Env):
         self.task.reset_state(self.data, self.np_random)
         self._last_action = np.zeros(self.task.num_actions)
         self._steps = 0
-        self._start_x = float(self.data.qpos[0])
+        self._start_xy = self.data.qpos[0:2].copy()
         self._next_push = self._push_delay()
         self._feet_down = self.task.feet_state(self.data)[1]
         self._air_time = np.zeros(len(self.task.feet))
@@ -91,17 +91,18 @@ class WalkEnv(gym.Env):
             last_action=self._last_action, up_z=up_z, fell=fell, foot_slip=foot_slip,
             feet_down=feet_down, landed=landed, air_time=air_time,
             foot_height=task.foot_heights(data), phase=task.gait_phase(self._steps + 1),  # the clock after this step
-            turn_rate=task.turn_rate(data),
+            turn_rate=task.turn_rate(data), height=float(data.qpos[2]),
+            joint_offset=data.qpos[task.joint_qpos] - task.home_ctrl,
         )
         self._last_action = action
         self._steps += 1
 
         observation = task.observation(data, self._last_action, task.gait_phase(self._steps))
-        terminated = fell
+        terminated = fell and task.config.terminate_on_fall  # standing: no; it has to get up
         truncated = self._steps >= task.max_steps
         info = {
             "forward_velocity": forward_velocity,
-            "distance": float(data.qpos[0]) - self._start_x,
+            "distance": task.distance(data.qpos[0:2] - self._start_xy),
             "motor_power": power,
             "fell": fell,
             **{f"reward_{name}": value for name, value in terms.items()},

@@ -313,6 +313,8 @@ export interface EvaluationInfo {
   diagonal_sync: number | null;
   /** Touchdowns per foot per second. */
   cadence: number | null;
+  /** Share of the time not fallen (null in older evaluations). For standing policies: includes getting up from fallen starts. */
+  upright: number | null;
 }
 
 export interface CheckpointInfo {

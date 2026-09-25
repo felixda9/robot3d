@@ -1,5 +1,6 @@
-"""The "walk forward" task: what a policy observes, how its actions become
-motor targets, and how it is rewarded.
+"""The "walk forward" task (and, with WalkConfig.stand(), the "stand" task):
+what a policy observes, how its actions become motor targets, and how it is
+rewarded.
 
 Shared by the Gymnasium environment (training, envs.py) and the policy player
 in the web server (watching, policy.py), so a policy sees and acts exactly
@@ -10,9 +11,9 @@ free-floating torso, every motor is a position actuator on a joint, and a
 "home" keyframe holds the standing pose's motor targets.
 """
 
-from dataclasses import asdict, dataclass, fields
-
 import math
+from dataclasses import asdict, dataclass, fields
+from functools import cached_property
 
 import mujoco
 import numpy as np
@@ -68,11 +69,23 @@ class WalkConfig:
     energy_weight: float = 0.002  # per watt of mechanical motor power |torque x joint speed|
     smoothness_weight: float = 0.05  # per unit of squared action change (discourages jitter)
     slip_weight: float = 0.5  # per (m/s)^2 of feet sliding along the floor while touching it
-    fall_penalty: float = 10.0  # once, when the episode ends by falling
+    # Per rad^2 of sideways leg angle (roll joints, robots that have them):
+    # walking straight needs none, so without this penalty walk12_straight
+    # walked splayed and lopsided (legs held 16-19 deg out). Small enough to
+    # still use roll to catch a shove. (legged_gym setups call it "hip_pos".)
+    roll_weight: float = 1.0
+    fall_penalty: float = 10.0  # once, when the episode ends by falling (terminate_on_fall)
 
-    # --- falling (ends the episode)
-    min_up_z: float = 0.5  # torso tilted more than 60 degrees
-    min_height_fraction: float = 0.5  # or torso lower than half its standing height
+    # Posture terms, for standing (0 while walking):
+    height_weight: float = 0.0  # x torso height / standing height (capped at 1): be up
+    pose_weight: float = 0.0  # x exp(-sum of (joint angle - home angle)^2 / pose_sigma): back in the standing pose
+    pose_sigma: float = 1.0  # rad^2
+    down_weight: float = 0.0  # penalty for every step spent fallen (with terminate_on_fall off)
+
+    # --- falling: tilted more than 60 degrees, or torso below half its standing height
+    min_up_z: float = 0.5
+    min_height_fraction: float = 0.5
+    terminate_on_fall: bool = True  # walking: a fall ends the episode. Standing: it goes on; get up!
 
     # --- start of each episode: the settled standing pose plus random noise,
     # so the policy learns to cope with slightly different starts
@@ -87,8 +100,39 @@ class WalkConfig:
     push_interval: float = 4.0  # s
     push_max_speed: float = 1.0  # m/s
 
+    # --- starting fallen (standing task): this share of episodes starts from
+    # a random fallen pose (on its side, back, belly...), so the policy
+    # practices getting up, not only staying up.
+    fallen_start_fraction: float = 0.0
+
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @classmethod
+    def stand(cls) -> "WalkConfig":
+        """The stand task (5c): stay upright where you are, catch shoves by
+        stepping if needed, and get back up after a fall. The same robot
+        interface as walking, so the viewer can switch between the two."""
+        return cls(
+            target_speed=0.0,  # the speed reward now pays for standing still
+            tracking_weight=1.0,
+            gait_frequency=0.0,  # no stepping rhythm: step only when needed
+            gait_weight=0.0,
+            clearance_weight=0.0,
+            upright_weight=1.0,
+            height_weight=1.0,
+            pose_weight=0.5,
+            down_weight=1.0,
+            fall_penalty=0.0,
+            terminate_on_fall=False,
+            fallen_start_fraction=0.5,
+            push_max_speed=1.5,  # standing still, it should take harder shoves than while walking
+            roll_weight=0.0,  # getting up needs the roll joints freely; the pose term tidies up afterwards
+        )
+
+    @property
+    def is_stand(self) -> bool:
+        return not self.terminate_on_fall
 
     @classmethod
     def from_run(cls, saved: dict) -> "WalkConfig":
@@ -107,6 +151,7 @@ class WalkConfig:
             "push_interval": 0.0,
             "velocity_frame": "world",
             "turn_weight": 0.0,
+            "roll_weight": 0.0,
         }
         unknown = sorted(set(saved) - {f.name for f in fields(cls)})
         if unknown:
@@ -167,6 +212,10 @@ class WalkTask:
 
         self.standing_qpos, self.standing_qvel = self._settled_standing_state(keyframe)
         self.standing_height = float(self.standing_qpos[2])
+        joints = model.actuator_trnid[:, 0]
+        self.joint_range = model.jnt_range[joints].copy()  # (motors, 2) min/max angle
+        # Sideways (roll) motors, by the naming convention "<leg>_roll" (quadruped12).
+        self.roll_motors = np.array([i for i in range(model.nu) if model.actuator(i).name.endswith("_roll")], dtype=int)
 
     # ----------------------------------------------------------------- actions
 
@@ -243,12 +292,15 @@ class WalkTask:
         foot_height: np.ndarray,
         phase: float,
         turn_rate: float,
+        height: float,
+        joint_offset: np.ndarray,
     ) -> tuple[float, dict[str, float]]:
         """Reward for one control step, plus each term separately (for logging).
 
         vx, vy: torso velocity over the step, forward and sideways (see
             heading_velocity()), m/s.
         turn_rate: how fast the torso turns about its own up axis, rad/s.
+        height: torso height, m. joint_offset: joint angles - home pose, rad.
         foot_slip: sum over planted feet of (sliding speed)^2, see foot_slip().
         feet_down: which feet are on the ground (bool per foot).
         landed, air_time: which feet touched down this step, and how long each
@@ -280,7 +332,11 @@ class WalkTask:
             "smoothness": -c.smoothness_weight * float(np.sum((action - last_action) ** 2)),
             "slip": -c.slip_weight * foot_slip,
             "support": -c.support_weight * float(np.sum(feet_down) < 2),
-            "fall": -c.fall_penalty if fell else 0.0,
+            "fall": -c.fall_penalty if fell and c.terminate_on_fall else 0.0,
+            "height": c.height_weight * min(max(height / self.standing_height, 0.0), 1.0),
+            "pose": c.pose_weight * math.exp(-float(np.sum(joint_offset**2)) / c.pose_sigma),
+            "down": -c.down_weight * float(fell),
+            "roll": -c.roll_weight * float(np.sum(joint_offset[self.roll_motors] ** 2)),
         }
         return float(sum(terms.values())), terms
 
@@ -312,6 +368,14 @@ class WalkTask:
         heading = math.atan2(nose[1], nose[0])
         c, s = math.cos(heading), math.sin(heading)
         return c * vx + s * vy, -s * vx + c * vy
+
+    def distance(self, displacement: np.ndarray) -> float:
+        """How far an episode got, from its (x, y) displacement: straight-line
+        distance for heading-frame tasks (after a shove turns it, the robot
+        walks on in its new direction), progress along +x for older runs."""
+        if self.config.velocity_frame == "world":
+            return float(displacement[0])
+        return float(np.linalg.norm(displacement))
 
     @staticmethod
     def turn_rate(data: mujoco.MjData) -> float:
@@ -350,16 +414,53 @@ class WalkTask:
         too_low = data.qpos[2] < self.config.min_height_fraction * self.standing_height
         return bool(too_tilted or too_low)
 
-    def reset_state(self, data: mujoco.MjData, rng: np.random.Generator) -> None:
-        """Start an episode: standing pose + noise, motors targeting home."""
+    def reset_state(self, data: mujoco.MjData, rng: np.random.Generator, allow_fallen: bool = True) -> None:
+        """Start an episode: standing pose + noise, motors targeting home. With
+        fallen_start_fraction, some episodes start lying down instead (not
+        when allow_fallen is off, e.g. in the viewer)."""
         mujoco.mj_resetData(self.model, data)
-        data.qpos[:] = self.standing_qpos
-        data.qvel[:] = self.standing_qvel
-        noise = self.config.reset_joint_noise
-        data.qpos[self.joint_qpos] += rng.uniform(-noise, noise, self.num_actions)
-        data.qvel[:] += rng.uniform(-self.config.reset_velocity_noise, self.config.reset_velocity_noise, self.model.nv)
+        c = self.config
+        if allow_fallen and c.fallen_start_fraction > 0 and rng.uniform() < c.fallen_start_fraction:
+            qpos, qvel = self.fallen_states
+            i = rng.integers(len(qpos))
+            data.qpos[:] = qpos[i]
+            data.qvel[:] = qvel[i]
+        else:
+            data.qpos[:] = self.standing_qpos
+            data.qvel[:] = self.standing_qvel
+            noise = c.reset_joint_noise
+            data.qpos[self.joint_qpos] += rng.uniform(-noise, noise, self.num_actions)
+            data.qvel[:] += rng.uniform(-c.reset_velocity_noise, c.reset_velocity_noise, self.model.nv)
         data.ctrl[:] = self.home_ctrl
         mujoco.mj_forward(self.model, data)
+
+    FALLEN_STATES = 128
+
+    @cached_property
+    def fallen_states(self) -> tuple[np.ndarray, np.ndarray]:
+        """(qpos, qvel) stacks of FALLEN_STATES ways to lie on the floor, made
+        once, on first use (~1 s): drop the robot from 0.5 m at a random
+        orientation with its joints held at random angles, and let it settle
+        for a second. Most land on a side, back or belly; some on their feet."""
+        rng = np.random.default_rng(0)
+        model = self.model
+        data = mujoco.MjData(model)
+        qpos, qvel = [], []
+        low, high = self.joint_range[:, 0], self.joint_range[:, 1]
+        for _ in range(self.FALLEN_STATES):
+            mujoco.mj_resetData(model, data)
+            data.qpos[:] = self.standing_qpos
+            data.qpos[2] = 0.5
+            orientation = rng.normal(size=4)  # a uniformly random rotation (normalized 4D Gaussian)
+            data.qpos[3:7] = orientation / np.linalg.norm(orientation)
+            angles = rng.uniform(low, high)
+            data.qpos[self.joint_qpos] = angles
+            data.ctrl[:] = np.clip(angles, self.ctrl_low, self.ctrl_high)
+            for _ in range(round(1.0 / model.opt.timestep)):
+                mujoco.mj_step(model, data)
+            qpos.append(data.qpos.copy())
+            qvel.append(data.qvel.copy())
+        return np.array(qpos), np.array(qvel)
 
     def _settled_standing_state(self, keyframe: str) -> tuple[np.ndarray, np.ndarray]:
         """Drop the robot from its keyframe and let it settle (1.5 s), once.
