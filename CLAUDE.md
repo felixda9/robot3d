@@ -137,12 +137,15 @@ web/                    Vite + TypeScript + three.js frontend
   and watch it in the web viewer.
 - [x] **5. Training dashboard:** training curves, checkpoint list, and replay of
   any checkpoint in the web UI.
+- [ ] **5b. GPU-parallel training** (moved up from "Future" on 2026-09-24 at the
+  user's request): MuJoCo Warp physics + batched walk task + PPO in PyTorch on
+  the RTX 3090; same metrics/dashboard as CPU runs; GPU checkpoints replay
+  in CPU MuJoCo. **Pipeline done and verified; the GPU PPO recipe isn't yet
+  as sample-efficient or stable as CPU** (see Decisions: GPU tuning).
 - [ ] **6. Robot designer:** simple YAML/JSON robot spec (body parts, joints,
   motors) → generated MJCF; then a visual editor in the browser.
 - [ ] **7. Environments & commands:** terrain, stairs, obstacles. Train a policy
   that follows direction + speed commands, controllable by keyboard or gamepad.
-- [ ] **Future: GPU-parallel training on the RTX 3090** (evaluate MJX / MuJoCo
-  Playground or Isaac Lab) once the CPU-based pipeline works end to end.
 
 ## How we work
 
@@ -152,6 +155,10 @@ web/                    Vite + TypeScript + three.js frontend
 - **Commit after each working milestone.**
 - If a design choice is significant or something is ambiguous, **ask** instead of
   guessing.
+- After changing `protocol.ts`/`protocol.py`, **restart any running backend**
+  (`uv run scripts/serve.py`). Vite hot-reloads the page at once, and a page
+  speaking the new protocol to an old server breaks (this happened once:
+  the dashboard showed "No data yet" until the server was restarted).
 
 ## Decisions log
 
@@ -340,41 +347,119 @@ web/                    Vite + TypeScript + three.js frontend
   - A run keeps its color slot while checked; up to 8 runs overlaid.
   - The reward-terms chart shows the selected run only.
 
+- **2026-09-24: CPU training fixes** (after walk_10m's KL spikes):
+  - PPOConfig: `lr_decay` (linear to 0, `LinearDecay` class so checkpoints
+    pickle) and `target_kl=0.02`.
+  - WalkConfig: `slip_weight=0.5` penalizes the sum of squared sliding speeds
+    of feet on the ground for the whole control step. Feet = geoms named
+    `*_foot`; on the ground = lowest point within 5 mm of the floor.
+  - `WalkConfig.from_run()` fills settings missing from old runs with their
+    original values (old runs: slip_weight 0).
+- **2026-09-24: GPU training architecture (milestone 5b):**
+  - `gpu/task.py` BatchedWalkTask: the walk task as batched torch math.
+    `tests/test_gpu_task.py` checks it equals WalkTask on the same states.
+  - `gpu/env.py` GpuWalkEnv:
+    - MuJoCo Warp (`mujoco-warp` 3.14, native Windows) with N worlds.
+      PyTorch reads and writes the Warp arrays through `wp.to_torch` views,
+      with no copies.
+    - The 10 physics steps per policy step, plus a Warp kernel adding up
+      motor power, are recorded once as a CUDA graph and replayed each step.
+    - Warp runs on PyTorch's CUDA stream.
+    - Robots that fall or time out restart standing, using
+      `mjw.reset_data(mask)` + `kinematics`.
+    - Stale-pose parity: after mj_step, MuJoCo's xmat/geom_xpos trail qpos
+      by one physics step. Observations and foot positions are taken before
+      the reset's kinematics call, so every robot sees what the CPU env sees.
+  - `gpu/ppo.py`: own compact PPO in the RSL-RL style (Stable-Baselines3
+    isn't built for GPU-batched envs):
+    - 4096 envs × 24 steps per rollout, 5 epochs × 4 minibatches;
+    - adaptive learning rate from the exact Gaussian KL (target 0.01),
+      clipped value loss, entropy 0.005;
+    - time-outs bootstrapped with V(s);
+    - same [256, 256] ELU networks and observation normalization as the CPU
+      runs;
+    - logs the same TensorBoard tags as SB3 (approx_kl uses SB3's estimator),
+      so the dashboard compares runs directly;
+    - checkpoints are `step_N.pt` (network + normalizer, format
+      "robot3d-ppo-v1").
+  - `runs.py` accepts `.zip` (SB3) and `.pt` (GPU) checkpoints.
+    PolicyController plays both on the CPU, so GPU-trained policies are
+    evaluated in regular float64 MuJoCo (the sim-to-sim check).
+    RunSummary has `backend` ("cpu"/"gpu"; old runs = cpu), shown as a pill
+    in the dashboard. The throughput chart uses a log axis.
+  - Checked on Warp's CPU backend: GpuWalkEnv vs WalkEnv from the same state
+    with the same actions give the same observations (~1e-4) and rewards
+    (1e-4) over 10 steps.
+  - PyTorch must be the CUDA build for GPU training (cu130 wheels exist for
+    torch 2.14 on Windows; driver 581.57 supports CUDA 13). A CUDA build also
+    runs everything on the CPU. It can't be swapped while a CPU training run
+    has PyTorch loaded (Windows file locks).
+  - CUDA graphs can't be recorded on PyTorch's legacy default stream, so
+    GpuWalkEnv creates its own torch.cuda.Stream and makes it current
+    (`torch.cuda.set_stream`).
+  - GPU env throughput (random policy, no learning): 4096 robots 112k,
+    8192 151k, 16384 186k policy steps/s (vs ~5k/s CPU training).
+  - Robots start at a random point of their first episode (as legged_gym
+    does). Otherwise all of them hit the 20 s limit together, and until then
+    the only finished episodes are falls: early "falls" read 100%.
+- **2026-09-25: GPU tuning experiments** (30M steps each, ~6.5–7.5 min;
+  evaluated in CPU MuJoCo):
+  - v1 `walk_gpu_30m` (legged_gym-like: init std 0.5, entropy 0.005,
+    RSL-RL adaptive lr): best return 1238.
+  - v2 `walk_gpu_v2` (init std 0.37, entropy 0.001): best 1283 at 17.6M
+    (3.8 min). Checkpoints alternated between good and barely moving;
+    adaptive lr swung between 1e-5 and 2e-3.
+  - v3 `walk_gpu_v3` (+ linear lr decay from 1e-3 + target_kl 0.02 early
+    stop + random episode starts): KL tame (max 0.014), best 1313 at 10M,
+    but checkpoints still alternate (15M: −0.18 m/s). Diagnosis: far fewer
+    gradient steps than CPU (~5k total vs ~28k), so std stayed 0.25 (CPU
+    0.05) and the noise-free "mean" policy is unreliable.
+  - v4 `walk_gpu_v4`: 10 epochs × 8 minibatches (up to 80 gradient steps
+    per rollout). std settled more (0.36 → 0.14), best 1326 at 12.6M
+    (2.9 min), but checkpoints still alternate (4/8 good after the first
+    good one); training reward also dips to ~500, which is "stand still".
+    **Current defaults = v4.**
+  - v5 `walk_gpu_v5` (v4 + SB3-style reward normalization + no value
+    clipping): stuck standing still for all 30M steps. The options remain,
+    off by default. One seed each, so no config comparison is conclusive.
+  - Summary, time to first checkpoint with return ≥ 1200 (CPU-MuJoCo eval):
+    - CPU fixed: 4.0 min; best 1421; 20/20 later checkpoints good.
+    - GPU v3/v4: 2.2–2.9 min; best 1313–1326; 3/9 and 4/8 good.
+    - GPU runs 15–18× more steps/s but need 10–20× more steps, so the
+      wall-clock to a good walker is about equal for this simple task, and
+      CPU is more reliable.
+  - Candidate next steps (user to choose):
+    - run a reference GPU PPO (RSL-RL) on the same GpuWalkEnv, to tell an
+      issue in our PPO from the massive-parallel regime;
+    - multi-seed sweeps (cheap on GPU: ~7 min per 30M run) over lr (3e-4 vs
+      1e-3), reward normalization, and fewer envs (1024–2048) with more steps
+      per env.
+    - GPU should matter most for harder tasks (terrain, commands), where
+      100M+ steps would take hours on the CPU.
+  - Transfer works throughout: every GPU checkpoint runs in float64 CPU
+    MuJoCo without falls.
+
 ## Current status
 
-**Milestone 5 done (2026-09-24), waiting for the user to test.** (M4
-confirmed by the user, who then asked me to run the full training.)
-- **First full run `runs/walk_10m`** (10M steps, 14 envs, 33m49s, ~4.9k steps/s):
-  - The robot learned a **canter** by ~4M steps: 3-beat, RR → FR+RL together
-    → FL, airborne ~30–34% of the cycle, ~4.2 steps/s per foot.
-  - No falls at any checkpoint in deterministic evaluation (5 episodes each).
-  - Return plateaus ~1420 from 4.5M on.
-  - Best by return: 6.0M (1425, 1.36 m/s); 9M is a tie within noise
-    (1423.5, 1.43 m/s, 31 W mean motor power vs 58 W at 1M).
-  - The newest checkpoint (10.01M) is weaker (1379).
-  - Gait at 1M: front legs hopped together and RL skittered (19
-    touchdowns/s, 0.41 m/s slip). Gone by 4M.
-  - Remaining flaw: feet slide ~0.25 m/s while touching the floor.
-- **PPO instability (full-run numbers, from TensorBoard):**
-  - approx_kl above 0.05 in **114** of 697 updates, **max 50.5** (at 9.48M);
-    spikes grew through the whole second half. (An earlier mid-run count said
-    14 / max 6.5; that only covered the log up to 7.1M.) Clip fraction ~0.3.
-  - Cause: the policy std collapsed to ~0.04–0.06 (from 0.37) with lr fixed
-    at 3e-4, so small action changes = huge KL.
-  - Snapshots right after spikes were bad: 2.5M (0.13 m/s), 7.0M (0.56 m/s).
-  - **Suggested fixes for the next run** (not applied yet; user to decide):
-    `target_kl≈0.02`, linear lr decay, possibly a std floor or a small
-    ent_coef, and a foot-slip penalty in the reward.
-- Dashboard verified in headless Edge:
-  - runs list + overlay (walk_10m vs smoke);
-  - 7 curve charts + reward terms;
-  - evaluated all 21 walk_10m checkpoints in 63 s, best marked;
-  - tooltip, keyboard reading and table view work;
-  - Watch loads the checkpoint in the simulator;
-  - no console errors.
-- Tests: 63 passing, `tsc` clean.
-- GPU research done (see Notes); not acted on yet. User asked whether to do
-  GPU-parallel training sooner.
+**2026-09-25: M5 confirmed by the user. Working on 5b (GPU training) plus a
+fixed CPU run; waiting for the user to decide how to continue the GPU tuning.**
+- `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
+  - 0 KL spikes (walk_10m: 114, max 50.5);
+  - steady 1.0–1.28 m/s after 3M steps;
+  - feet slide half as much (0.10–0.13 vs 0.22–0.28 m/s) with higher steps
+    (3–5 cm);
+  - best return 1421 at 8.5M.
+- PyTorch switched to the CUDA 13.0 build (torch 2.14.0+cu130).
+- GPU pipeline done and tested:
+  - batched task parity;
+  - GPU vs CPU physics parity on the real GPU;
+  - fallen robots restart;
+  - a tiny GPU training run plays in CPU MuJoCo.
+- GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
+  sample efficiency and stability are not yet at CPU level.
+- Tests: 73 passing (GPU tests skip without CUDA), `tsc` clean.
+- The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
+  errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after
   each milestone commit.
 

@@ -58,6 +58,15 @@ body.view-training {
   color: var(--ink-muted);
 }
 
+.dash-error {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #2b1a1a;
+  border: 1px solid #d03b3b;
+  font-size: 13px;
+}
+
 /* --------------------------------------------------------------- runs list */
 
 .runs {

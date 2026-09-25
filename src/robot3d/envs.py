@@ -53,6 +53,7 @@ class WalkEnv(gym.Env):
         data.ctrl[:] = task.action_to_ctrl(action)
 
         x_before = data.qpos[0]
+        feet_before = task.feet_state(data)
         power = 0.0
         for _ in range(task.decimation):
             mujoco.mj_step(model, data)
@@ -62,10 +63,11 @@ class WalkEnv(gym.Env):
         power /= task.decimation
         # Average speed over the step (smoother than the instantaneous velocity).
         forward_velocity = (data.qpos[0] - x_before) / task.control_dt
+        foot_slip = task.foot_slip(feet_before, task.feet_state(data))
 
         up_z = task.up_z(data)
         fell = task.fell(data)
-        reward, terms = task.reward(forward_velocity, power, action, self._last_action, up_z, fell)
+        reward, terms = task.reward(forward_velocity, power, action, self._last_action, up_z, fell, foot_slip)
         self._last_action = action
         self._steps += 1
 

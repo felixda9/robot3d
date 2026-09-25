@@ -29,6 +29,7 @@ class WalkConfig:
     upright_weight: float = 0.5  # torso "up" axis . world up: 1 level, 0 on its side
     energy_weight: float = 0.002  # per watt of mechanical motor power |torque x joint speed|
     smoothness_weight: float = 0.05  # per unit of squared action change (discourages jitter)
+    slip_weight: float = 0.5  # per (m/s)^2 of feet sliding along the floor while touching it
     fall_penalty: float = 10.0  # once, when the episode ends by falling
 
     # --- falling (ends the episode)
@@ -42,6 +43,13 @@ class WalkConfig:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @classmethod
+    def from_run(cls, saved: dict) -> "WalkConfig":
+        """Settings from a run's run.json. A setting added after the run was
+        trained gets the value that reproduces how it was trained."""
+        before_it_existed = {"slip_weight": 0.0}
+        return cls(**{**before_it_existed, **saved})
 
 
 class WalkTask:
@@ -67,6 +75,12 @@ class WalkTask:
         # then per motor: joint angle, joint speed, previous action
         self.obs_size = 1 + 3 + 3 + 3 + 3 * model.nu
 
+        # Feet (project convention: geoms named "<leg>_foot"), for the slip
+        # penalty. A foot counts as on the ground when its lowest point is
+        # within FOOT_CONTACT_MARGIN of the floor (spheres: center z - radius).
+        self.feet = np.array([g for g in range(model.ngeom) if model.geom(g).name.endswith("_foot")], dtype=int)
+        self.foot_radius = model.geom_size[self.feet, 0]
+
         self.standing_qpos, self.standing_qvel = self._settled_standing_state(keyframe)
         self.standing_height = float(self.standing_qpos[2])
 
@@ -90,6 +104,10 @@ class WalkTask:
         Directions are expressed in the torso's own frame, so the policy
         behaves the same whichever way the robot faces, and absolute x/y
         position is left out (walking works the same anywhere on the floor).
+
+        Called right after mj_step, when MuJoCo's xmat is from the start of
+        that step (2 ms behind qpos). Training, the viewer and the GPU version
+        all read it at that point, so the policy always sees the same thing.
         """
         torso_rot = data.xmat[1].reshape(3, 3)  # torso frame -> world frame
         world_to_torso = torso_rot.T
@@ -112,17 +130,39 @@ class WalkTask:
         last_action: np.ndarray,
         up_z: float,
         fell: bool,
+        foot_slip: float = 0.0,
     ) -> tuple[float, dict[str, float]]:
-        """Reward for one control step, plus each term separately (for logging)."""
+        """Reward for one control step, plus each term separately (for logging).
+        foot_slip: sum over grounded feet of (sliding speed)^2, see foot_slip()."""
         c = self.config
         terms = {
             "forward": c.forward_weight * min(float(forward_velocity), c.max_reward_speed),
             "upright": c.upright_weight * up_z,
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * float(np.sum((action - last_action) ** 2)),
+            "slip": -c.slip_weight * foot_slip,
             "fall": -c.fall_penalty if fell else 0.0,
         }
         return float(sum(terms.values())), terms
+
+    # ----------------------------------------------------------------- feet
+
+    FOOT_CONTACT_MARGIN = 0.005  # m
+
+    def feet_state(self, data: mujoco.MjData) -> tuple[np.ndarray, np.ndarray]:
+        """(x/y position of each foot, whether each foot is on the ground)."""
+        pos = data.geom_xpos[self.feet]
+        on_ground = pos[:, 2] - self.foot_radius < self.FOOT_CONTACT_MARGIN
+        return pos[:, :2].copy(), on_ground
+
+    def foot_slip(self, before: tuple[np.ndarray, np.ndarray], after: tuple[np.ndarray, np.ndarray]) -> float:
+        """Sum of squared sliding speeds (m/s)^2 of feet that stayed on the
+        ground for the whole control step. A foot planted on the ground
+        should not move; if it does, it is skidding, which wastes effort and
+        on a real robot wears the feet and makes the gait unpredictable."""
+        (xy0, down0), (xy1, down1) = before, after
+        speed = np.linalg.norm(xy1 - xy0, axis=1) / self.control_dt
+        return float(np.sum(np.where(down0 & down1, speed**2, 0.0)))
 
     # ---------------------------------------------------------------- episodes
 

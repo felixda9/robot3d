@@ -13,12 +13,10 @@ learned value function), then nudge the policy toward the better actions,
 but only a little per update ("proximal"), so learning doesn't lurch. Repeat.
 """
 
-import json
 import os
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 import psutil
@@ -29,12 +27,8 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
 from robot3d.envs import WalkEnv
-from robot3d.runs import RUNS_DIR
+from robot3d.runs import RUNS_DIR, default_run_name, now_iso, write_run_info
 from robot3d.walk import WalkConfig
-
-
-def default_run_name(robot: str) -> str:
-    return f"{datetime.now():%Y%m%d-%H%M%S}_{robot}_walk"
 
 
 def default_num_envs() -> int:
@@ -54,13 +48,30 @@ class PPOConfig:
     n_steps: int = 1024  # steps per env per rollout (1024 x 20 ms = ~20 s, about one episode)
     minibatches: int = 4  # each rollout is split into this many batches per epoch
     n_epochs: int = 10  # passes over each rollout
-    learning_rate: float = 3e-4
+    learning_rate: float = 3e-4  # at the start...
+    lr_decay: bool = True  # ...then falling linearly to 0 by the end of the run
+    # Stop an update's epochs early once the policy has moved this far (KL
+    # divergence between old and new policy). Without these two, walk_10m's
+    # late updates jumped the policy far too much (KL up to 50) once its
+    # exploration noise had shrunk.
+    target_kl: float | None = 0.02
     gamma: float = 0.99  # discount: how much future reward counts (0.99 = ~100 steps = 2 s horizon)
     gae_lambda: float = 0.95  # advantage estimation smoothing (bias vs variance)
     clip_range: float = 0.2  # the "proximal" part: max policy change per update
     ent_coef: float = 0.0  # bonus for randomness (exploration); the policy's own noise suffices here
     net_arch: list[int] = field(default_factory=lambda: [256, 256])  # hidden layers (policy and value nets)
     log_std_init: float = -1.0  # initial exploration noise: std e^-1 = 0.37 in action units (~0.18 rad)
+
+
+class LinearDecay:
+    """Learning-rate schedule: SB3 calls it with the fraction of training
+    left (1 -> 0). A class, not a lambda, so saved checkpoints can pickle it."""
+
+    def __init__(self, start: float):
+        self.start = start
+
+    def __call__(self, progress_remaining: float) -> float:
+        return self.start * progress_remaining
 
 
 class CheckpointEvery(BaseCallback):
@@ -103,9 +114,9 @@ class Heartbeat(BaseCallback):
         now = time.monotonic()
         if now - self._last >= self.every:
             self._last = now
-            self.run_info.update(steps_done=int(self.num_timesteps), updated=_now())
+            self.run_info.update(steps_done=int(self.num_timesteps), updated=now_iso())
             try:
-                _write_json(self.run_dir / "run.json", self.run_info)
+                write_run_info(self.run_dir, self.run_info)
             except OSError:
                 pass  # never crash training over a progress note; next beat retries
 
@@ -160,7 +171,7 @@ def train(
     run_info = {
         "robot": robot,
         "task": "walk",
-        "started": _now(),
+        "started": now_iso(),
         "command": " ".join(sys.argv),
         "total_steps": total_steps,
         "n_envs": n_envs,
@@ -168,7 +179,7 @@ def train(
         "walk_config": walk.to_dict(),
         "ppo_config": asdict(ppo),
     }
-    _write_json(run_dir / "run.json", run_info)
+    write_run_info(run_dir, run_info)
 
     # Each env runs in its own process (SubprocVecEnv), so they step in parallel.
     # VecNormalize rescales observations (and rewards) to ~zero mean and unit
@@ -185,7 +196,8 @@ def train(
         n_steps=ppo.n_steps,
         batch_size=ppo.n_steps * n_envs // ppo.minibatches,
         n_epochs=ppo.n_epochs,
-        learning_rate=ppo.learning_rate,
+        learning_rate=LinearDecay(ppo.learning_rate) if ppo.lr_decay else ppo.learning_rate,
+        target_kl=ppo.target_kl,
         gamma=ppo.gamma,
         gae_lambda=ppo.gae_lambda,
         clip_range=ppo.clip_range,
@@ -212,29 +224,10 @@ def train(
         final = checkpoints.save()
         envs.close()
         run_info.update(
-            finished=_now(),
+            finished=now_iso(),
             steps_done=int(model.num_timesteps),
             interrupted=interrupted,
             final_checkpoint=str(final.relative_to(run_dir)),
         )
-        _write_json(run_dir / "run.json", run_info)
+        write_run_info(run_dir, run_info)
     return run_dir
-
-
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def _write_json(path: Path, data: dict) -> None:
-    # Write a temp file, then swap it in, so a reader (the dashboard) never
-    # sees a half-written run.json. On Windows the swap fails while another
-    # process has the file open for that instant, so retry briefly.
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    for _ in range(40):
-        try:
-            tmp.replace(path)
-            return
-        except PermissionError:
-            time.sleep(0.05)
-    tmp.replace(path)  # last try: let the error surface

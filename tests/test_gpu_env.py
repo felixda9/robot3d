@@ -1,0 +1,105 @@
+"""GPU environment (MuJoCo Warp) and GPU training, end to end.
+
+Skipped without an NVIDIA GPU + CUDA build of PyTorch. The key check:
+the same robot, started in the same state and given the same actions,
+behaves the same in MuJoCo Warp (float32, GPU) as in regular MuJoCo
+(float64, CPU): same observations and rewards within float32 tolerance.
+"""
+
+import numpy as np
+import pytest
+import torch
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU and CUDA PyTorch")
+
+
+@pytest.fixture(scope="module")
+def gpu_env():
+    from robot3d.gpu.env import GpuWalkEnv
+
+    env = GpuWalkEnv(num_envs=64, device="cuda:0", seed=0)
+    env.reset()
+    return env
+
+
+def put_cpu_state_into_world(gpu_env, world, cpu_env):
+    """Copy a CPU env's state into one GPU world (after the batch was reset)."""
+    import mujoco_warp as mjw
+    import warp as wp
+
+    gpu_env.qpos[world] = torch.as_tensor(cpu_env.data.qpos, dtype=torch.float32, device=gpu_env.device)
+    gpu_env.qvel[world] = torch.as_tensor(cpu_env.data.qvel, dtype=torch.float32, device=gpu_env.device)
+    gpu_env.ctrl[world] = torch.as_tensor(cpu_env.data.ctrl, dtype=torch.float32, device=gpu_env.device)
+    with wp.ScopedDevice(gpu_env.wp_device), wp.ScopedStream(wp.stream_from_torch(gpu_env.device)):
+        mjw.kinematics(gpu_env.m, gpu_env.d)
+    gpu_env.last_action[world] = 0.0
+    gpu_env.episode_length[world] = 0
+    gpu_env.start_x[world] = gpu_env.qpos[world, 0]
+    xy, down = gpu_env.task.feet_state(gpu_env.geom_xpos)
+    gpu_env._feet_before[0][world] = xy[world]
+    gpu_env._feet_before[1][world] = down[world]
+
+
+def test_gpu_physics_matches_cpu(gpu_env):
+    from robot3d.envs import WalkEnv
+
+    cpu = WalkEnv()
+    cpu_obs, _ = cpu.reset(seed=3)
+    gpu_env.reset()
+    put_cpu_state_into_world(gpu_env, 0, cpu)
+    torch.testing.assert_close(gpu_env.observe()[0].cpu(), torch.tensor(cpu_obs), rtol=1e-4, atol=1e-4)
+
+    rng = np.random.default_rng(0)
+    for step in range(15):  # 0.3 s of walking-like random motion
+        action = rng.uniform(-0.5, 0.5, cpu.task.num_actions)
+        cpu_obs, cpu_reward, *_ , cpu_info = cpu.step(action)
+        actions = torch.zeros((gpu_env.num_envs, gpu_env.num_actions), device=gpu_env.device)
+        actions[0] = torch.as_tensor(action, dtype=torch.float32)
+        result = gpu_env.step(actions)
+        gpu_obs = result.obs[0].cpu().numpy()
+        # float32 vs float64 and solver details: small differences that grow slowly.
+        tol = 2e-3 * (1 + step)
+        np.testing.assert_allclose(gpu_obs[:10], cpu_obs[:10], atol=tol, err_msg=f"torso state, step {step}")
+        np.testing.assert_allclose(gpu_obs[10:18], cpu_obs[10:18], atol=tol, err_msg=f"joint angles, step {step}")
+        assert result.reward[0].item() == pytest.approx(cpu_reward, abs=0.05 + 0.02 * step), f"reward, step {step}"
+
+
+def test_fallen_robots_restart_standing(gpu_env):
+    gpu_env.reset()
+    gpu_env.qpos[5, 3:7] = torch.tensor([0.0, 1.0, 0.0, 0.0], device=gpu_env.device)  # upside down
+    result = gpu_env.step(torch.zeros((gpu_env.num_envs, gpu_env.num_actions), device=gpu_env.device))
+    assert result.done[5] and not result.time_out[5]
+    assert result.episode_fell.tolist() == [True] * int(result.done.sum())
+    assert gpu_env.episode_length[5] == 0  # restarted
+    assert gpu_env.qpos[5, 2].item() == pytest.approx(gpu_env.task.standing_height, abs=0.02)
+    assert result.obs[5, 0].item() == pytest.approx(gpu_env.task.standing_height, abs=0.02)  # its new observation
+
+
+def test_tiny_gpu_training_run_plays_in_cpu_mujoco(tmp_path):
+    from robot3d.gpu.ppo import GpuPPOConfig, train_gpu
+    from robot3d.policy import PolicyController, evaluate
+    from robot3d.runs import list_checkpoints, run_summary
+    from robot3d.simulation import Simulation
+
+    run_dir = train_gpu(
+        total_steps=256 * 24 * 3,
+        name="tiny_gpu",
+        checkpoint_every=256 * 24,
+        ppo=GpuPPOConfig(num_envs=256),
+        runs_dir=tmp_path,
+        log=lambda *_: None,
+    )
+    summary = run_summary(run_dir)
+    assert summary.backend == "gpu" and summary.status == "finished"
+    checkpoints = list_checkpoints(run_dir)
+    assert len(checkpoints) >= 2 and all(c.format == "torch" for c in checkpoints)
+    assert list((run_dir / "tb").rglob("events.out.tfevents.*"))
+
+    # A GPU-trained policy drives regular CPU MuJoCo (the viewer's path).
+    sim = Simulation("quadruped")
+    sim.set_controller(PolicyController(checkpoints[-1], sim.model))
+    for _ in range(50):
+        sim.step()
+    assert np.isfinite(sim.data.qpos).all()
+    results = evaluate(checkpoints[-1], episodes=1)
+    assert results[0]["seconds"] > 0

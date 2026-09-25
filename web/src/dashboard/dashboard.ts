@@ -43,10 +43,10 @@ const CURVES: CurveChart[] = [
   {
     tag: "time/fps",
     title: "Training speed",
-    subtitle: "Environment steps per second, all parallel environments together.",
+    subtitle: "Environment steps per second, all parallel environments together (log scale: CPU vs GPU differ >10x).",
     format: (v) => `${Math.round(v).toLocaleString()} steps/s`,
     tickFormat: (v) => formatSteps(v),
-    yMin: 0,
+    log: true,
   },
   {
     tag: "train/std",
@@ -75,7 +75,7 @@ const CURVES: CurveChart[] = [
 ];
 
 // Reward terms of the selected run, one line per term (fixed order = fixed colors).
-const REWARD_TERMS = ["forward", "upright", "energy", "smoothness", "fall"];
+const REWARD_TERMS = ["forward", "upright", "energy", "smoothness", "slip", "fall"];
 
 export interface DashboardOptions {
   /** Replay a checkpoint in the simulator. */
@@ -141,6 +141,34 @@ export class Dashboard {
   // ------------------------------------------------------------------ data
 
   private async refresh(): Promise<void> {
+    try {
+      await this.refreshUnsafe();
+      this.showError(null);
+    } catch (e) {
+      // Never fail silently (blank charts that just say "No data yet").
+      console.error(e);
+      this.showError(
+        `Dashboard error: ${(e as Error).message}. If you just updated the code, restart the server ` +
+          "(uv run scripts/serve.py) so the page and server speak the same protocol.",
+      );
+    }
+  }
+
+  private showError(message: string | null): void {
+    let banner = this.detail.querySelector<HTMLElement>(".dash-error");
+    if (message === null) {
+      banner?.remove();
+      return;
+    }
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.className = "dash-error";
+      this.detail.prepend(banner);
+    }
+    banner.textContent = message;
+  }
+
+  private async refreshUnsafe(): Promise<void> {
     try {
       this.runs = await api.runs();
     } catch (e) {
@@ -234,7 +262,12 @@ export class Dashboard {
         name.addEventListener("click", () => void this.select(run.name));
         const meta = document.createElement("div");
         meta.className = "run-meta";
-        meta.append(statusPill(run), document.createTextNode(` ${formatSteps(run.steps_done)} steps`));
+        meta.append(
+          statusPill(run),
+          " ",
+          backendPill(run),
+          document.createTextNode(` ${formatSteps(run.steps_done)} steps`),
+        );
         const text = document.createElement("div");
         text.append(name, meta);
         row.append(box, swatch, text);
@@ -282,7 +315,15 @@ export class Dashboard {
     const title = document.createElement("h2");
     title.textContent = s.name;
     const meta = document.createElement("p");
-    meta.append(statusPill(s), document.createTextNode(` ${s.robot} · ${s.n_envs} parallel environments · started ${s.started.replace("T", " ")}`));
+    const where = s.backend === "gpu" ? "on the GPU" : "on the CPU";
+    meta.append(
+      statusPill(s),
+      " ",
+      backendPill(s),
+      document.createTextNode(
+        ` ${s.robot} · ${s.n_envs.toLocaleString()} parallel environments ${where} · started ${s.started.replace("T", " ")}`,
+      ),
+    );
     head.replaceChildren(title, meta);
 
     const best = bestCheckpoint(d.checkpoints);
@@ -402,6 +443,14 @@ function statusPill(run: RunSummary): HTMLElement {
   const pill = document.createElement("span");
   pill.className = `pill status-${run.status}`;
   pill.textContent = run.status;
+  return pill;
+}
+
+function backendPill(run: RunSummary): HTMLElement {
+  const pill = document.createElement("span");
+  pill.className = "pill backend";
+  pill.textContent = run.backend.toUpperCase();
+  pill.title = run.backend === "gpu" ? "Trained on the GPU (MuJoCo Warp)" : "Trained on the CPU (Stable-Baselines3)";
   return pill;
 }
 

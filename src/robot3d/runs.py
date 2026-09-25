@@ -16,6 +16,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from robot3d.protocol import (
@@ -30,7 +31,9 @@ from robot3d.protocol import (
 
 RUNS_DIR = Path(__file__).resolve().parents[2] / "runs"
 
-_STEP_FILE = re.compile(r"^step_(\d+)\.zip$")
+# step_<N>.zip = Stable-Baselines3 (CPU) checkpoint, needs step_<N>_vecnormalize.pkl;
+# step_<N>.pt = GPU-PPO checkpoint (network + normalizer in one file).
+_STEP_FILE = re.compile(r"^step_(\d+)\.(zip|pt)$")
 _SAFE_NAME = re.compile(r"^[\w][\w.-]*$")
 # A run without a "finished" mark counts as running while its files keep
 # changing (training rewrites run.json every ~30 s); otherwise it crashed or
@@ -53,6 +56,11 @@ class Checkpoint:
     @property
     def steps(self) -> int:
         return int(_STEP_FILE.match(self.model_path.name).group(1))
+
+    @property
+    def format(self) -> str:
+        """"sb3" (CPU training) or "torch" (GPU training)."""
+        return "torch" if self.model_path.suffix == ".pt" else "sb3"
 
     @property
     def normalizer_path(self) -> Path:
@@ -78,24 +86,25 @@ class Checkpoint:
 
 
 def list_checkpoints(run_dir: Path) -> list[Checkpoint]:
-    """A run's complete checkpoints (network + normalizer saved), oldest first."""
-    paths = sorted((run_dir / "checkpoints").glob("step_*.zip"))
+    """A run's complete checkpoints, oldest first (an SB3 .zip counts once its
+    normalizer file is saved too)."""
+    paths = sorted((run_dir / "checkpoints").glob("step_*"))
     checkpoints = [Checkpoint(p, run_dir) for p in paths if _STEP_FILE.match(p.name)]
-    return [c for c in checkpoints if c.normalizer_path.is_file()]
+    return [c for c in checkpoints if c.format == "torch" or c.normalizer_path.is_file()]
 
 
 def find_checkpoint(path: str | Path) -> Checkpoint:
-    """A checkpoint .zip, or a run folder (-> its newest checkpoint)."""
+    """A checkpoint file (.zip or .pt), or a run folder (-> its newest checkpoint)."""
     path = Path(path)
     if path.is_file():
         if not _STEP_FILE.match(path.name):
-            raise ValueError(f"Not a checkpoint file (expected step_<N>.zip): {path}")
+            raise ValueError(f"Not a checkpoint file (expected step_<N>.zip or .pt): {path}")
         return Checkpoint(path, path.parent.parent)
     if path.name == "checkpoints":
         path = path.parent
     checkpoints = list_checkpoints(path)
     if not checkpoints:
-        raise FileNotFoundError(f"No checkpoints in {path} (expected {path / 'checkpoints' / 'step_<N>.zip'})")
+        raise FileNotFoundError(f"No checkpoints in {path} (expected {path / 'checkpoints' / 'step_<N>.zip or .pt'})")
     return checkpoints[-1]
 
 
@@ -118,6 +127,30 @@ def save_evaluation(checkpoint: Checkpoint, results: list[dict]) -> EvaluationIn
 
 def read_run_info(run_dir: Path) -> dict:
     return json.loads((run_dir / "run.json").read_text())
+
+
+def write_run_info(run_dir: Path, info: dict) -> None:
+    """Write run.json atomically: a temp file, then swapped in, so a reader
+    (the dashboard) never sees a half-written file. On Windows the swap fails
+    while another process has the file open for that instant, so retry."""
+    path = run_dir / "run.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(info, indent=2) + "\n")
+    for _ in range(40):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+    tmp.replace(path)  # last try: let the error surface
+
+
+def now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def default_run_name(robot: str, suffix: str = "walk") -> str:
+    return f"{datetime.now():%Y%m%d-%H%M%S}_{robot}_{suffix}"
 
 
 def list_run_dirs(runs_dir: Path = RUNS_DIR) -> list[Path]:
@@ -160,6 +193,7 @@ def run_summary(run_dir: Path) -> RunSummary:
     return RunSummary(
         name=run_dir.name,
         robot=info.get("robot", "?"),
+        backend=info.get("backend", "cpu"),  # runs from before GPU training existed were CPU
         status=run_status(run_dir, info),
         started=info.get("started", ""),
         finished=info.get("finished", ""),

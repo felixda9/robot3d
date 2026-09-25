@@ -4,18 +4,48 @@
     checkpoint = find_checkpoint("runs/my_run/checkpoints/step_002000000.zip")
     controller = PolicyController(checkpoint, sim.model)
     sim.set_controller(controller)                     # the policy now drives the motors
+
+Two checkpoint formats, same behavior: SB3 (.zip, CPU training) and GPU-PPO
+(.pt, gpu/ppo.py). Both run here on the CPU in regular (float64) MuJoCo,
+which is also how GPU-trained policies are checked against the physics they
+weren't trained in (float32 MuJoCo Warp).
 """
 
 import pickle
+from collections.abc import Callable
 
 import mujoco
 import numpy as np
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import VecNormalize
 
 # Checkpoint discovery lives in runs.py (no PyTorch); re-exported here.
 from robot3d.runs import Checkpoint, find_checkpoint, list_checkpoints  # noqa: F401
 from robot3d.walk import WalkConfig, WalkTask
+
+
+def _load_sb3(checkpoint: Checkpoint) -> tuple[Callable[[np.ndarray], np.ndarray], int]:
+    from stable_baselines3 import PPO
+
+    policy = PPO.load(checkpoint.model_path, device="cpu")
+    with open(checkpoint.normalizer_path, "rb") as f:
+        # The saved VecNormalize holds the running mean/variance of the
+        # observations seen in training; the policy needs inputs scaled the
+        # same way. (Unpickled without an env: we only use normalize_obs.)
+        normalizer = pickle.load(f)
+
+    def predict(observation: np.ndarray) -> np.ndarray:
+        # deterministic=True: the policy's best guess, without the random
+        # exploration noise used during training.
+        action, _ = policy.predict(normalizer.normalize_obs(observation), deterministic=True)
+        return action
+
+    return predict, policy.observation_space.shape[0]
+
+
+def _load_torch(checkpoint: Checkpoint) -> tuple[Callable[[np.ndarray], np.ndarray], int]:
+    from robot3d.gpu.ppo import TorchPolicy
+
+    policy = TorchPolicy(checkpoint.model_path)  # normalizes internally, mean action
+    return policy.act, policy.num_obs
 
 
 class PolicyController:
@@ -29,20 +59,15 @@ class PolicyController:
     def __init__(self, checkpoint: Checkpoint, model: mujoco.MjModel):
         info = checkpoint.run_info()
         self.checkpoint = checkpoint
-        self.task = WalkTask(model, WalkConfig(**info["walk_config"]))
+        self.task = WalkTask(model, WalkConfig.from_run(info["walk_config"]))
         self.decimation = self.task.decimation
-        self.policy = PPO.load(checkpoint.model_path, device="cpu")
-        expected = self.policy.observation_space.shape
-        if expected != (self.task.obs_size,):
+        load = _load_torch if checkpoint.format == "torch" else _load_sb3
+        self._predict, expected_obs = load(checkpoint)
+        if expected_obs != self.task.obs_size:
             raise ValueError(
-                f"{checkpoint.label} expects observations of shape {expected}, but robot "
-                f"{info['robot']!r} with this task gives ({self.task.obs_size},). Wrong robot?"
+                f"{checkpoint.label} expects {expected_obs} observations, but robot "
+                f"{info['robot']!r} with this task gives {self.task.obs_size}. Wrong robot?"
             )
-        with open(checkpoint.normalizer_path, "rb") as f:
-            # The saved VecNormalize holds the running mean/variance of the
-            # observations seen in training; the policy needs inputs scaled
-            # the same way. (Unpickled without an env: we only use normalize_obs.)
-            self.normalizer: VecNormalize = pickle.load(f)
         self.last_action = np.zeros(self.task.num_actions)
         self._rng = np.random.default_rng()
 
@@ -55,12 +80,8 @@ class PolicyController:
 
     def action(self, data: mujoco.MjData) -> np.ndarray:
         """The policy's action (-1..1 per motor) for the current state."""
-        observation = self.task.observation(data, self.last_action)
-        normalized = self.normalizer.normalize_obs(observation)
-        # deterministic=True: use the policy's best guess, without the random
-        # exploration noise used during training.
-        action, _ = self.policy.predict(normalized, deterministic=True)
-        self.last_action = np.clip(action.astype(np.float64), -1.0, 1.0)
+        action = self._predict(self.task.observation(data, self.last_action))
+        self.last_action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         return self.last_action
 
     def act(self, data: mujoco.MjData) -> None:
@@ -73,7 +94,7 @@ def evaluate(checkpoint: Checkpoint, episodes: int = 5, seed: int = 0) -> list[d
     from robot3d.envs import WalkEnv  # here to keep `import robot3d.policy` light
 
     info = checkpoint.run_info()
-    env = WalkEnv(info["robot"], WalkConfig(**info["walk_config"]))
+    env = WalkEnv(info["robot"], WalkConfig.from_run(info["walk_config"]))
     controller = PolicyController(checkpoint, env.model)
     results = []
     for episode in range(episodes):

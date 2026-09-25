@@ -239,6 +239,8 @@ export interface RunSummary {
   /** Folder name under runs/. */
   name: string;
   robot: string;
+  /** Where it trained: "cpu" (Stable-Baselines3) or "gpu" (MuJoCo Warp + GPU PPO). */
+  backend: string;
   status: RunStatus;
   /** ISO timestamps; finished is "" while running or if it crashed. */
   started: string;

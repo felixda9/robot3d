@@ -86,6 +86,28 @@ def test_moving_forward_is_rewarded_up_to_a_cap(env):
     assert terms(3.0)["forward"] == pytest.approx(config.max_reward_speed * config.forward_weight)
 
 
+def test_foot_slip_penalty(env):
+    env.reset(seed=0)
+    for _ in range(50):  # let the reset noise settle (the feet shuffle a little at first)
+        _, _, _, _, info = env.step(np.zeros(8))
+    assert info["reward_slip"] == pytest.approx(0.0, abs=1e-4)  # standing: feet planted
+
+    env.reset(seed=0)
+    env.data.qvel[0] = 1.5  # shove the whole robot forward: planted feet skid
+    mujoco.mj_forward(env.model, env.data)
+    _, _, _, _, info = env.step(np.zeros(8))
+    assert info["reward_slip"] < -0.1
+
+
+def test_old_runs_keep_their_reward():
+    from robot3d.walk import WalkConfig
+
+    saved = WalkConfig().to_dict()
+    del saved["slip_weight"]  # a run from before the slip penalty existed
+    assert WalkConfig.from_run(saved).slip_weight == 0.0
+    assert WalkConfig.from_run(WalkConfig().to_dict()) == WalkConfig()
+
+
 def test_same_seed_same_episode():
     a, b = WalkEnv(), WalkEnv()
     obs_a, _ = a.reset(seed=42)

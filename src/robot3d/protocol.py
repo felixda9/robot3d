@@ -159,6 +159,7 @@ RunStatus = Literal["running", "finished", "stopped"]
 class RunSummary(_Message):
     name: str
     robot: str
+    backend: str
     status: RunStatus
     started: str
     finished: str

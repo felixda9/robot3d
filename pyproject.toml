@@ -7,6 +7,7 @@ dependencies = [
     "fastapi>=0.141.1",
     "gymnasium>=1.3.0",
     "mujoco>=3.14.0",
+    "mujoco-warp>=3.14.0",
     "psutil>=7.2.2",
     "stable-baselines3>=2.9.0",
     "tensorboard>=2.21.0",
@@ -21,14 +22,15 @@ dev = [
     "pytest-timeout>=2.4.0",
 ]
 
-# PyTorch: CPU-only build (SB3's PPO with small MLPs runs best on the CPU).
-# To use CUDA instead, point this at e.g. https://download.pytorch.org/whl/cu128.
+# PyTorch: the CUDA 13.0 build, for GPU training (scripts/train_gpu.py). It
+# also runs everything on the CPU (SB3 CPU training, the web server). For a
+# machine without an NVIDIA GPU, point this at https://download.pytorch.org/whl/cpu.
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu" }]
+torch = [{ index = "pytorch-cu130" }]
 
 [[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true  # only torch comes from here; everything else from PyPI
 
 [build-system]
