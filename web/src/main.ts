@@ -4,7 +4,7 @@ import { Dashboard } from "./dashboard/dashboard";
 import { RobotMouse } from "./interaction";
 import { Steering } from "./steering";
 import { MotorPanel } from "./motors";
-import type { Mode, ServerMessage, StatusMessage } from "./protocol";
+import type { Ground, Mode, ServerMessage, StatusMessage } from "./protocol";
 import { Viewer } from "./viewer";
 
 function element<T extends HTMLElement>(id: string): T {
@@ -32,6 +32,11 @@ const ui = {
   jump: element<HTMLButtonElement>("jump"),
   jumping: element<HTMLDivElement>("jumping"),
   steering: element<HTMLDivElement>("steering"),
+  grounds: {
+    flat: element<HTMLButtonElement>("ground-flat"),
+    park: element<HTMLButtonElement>("ground-park"),
+    course: element<HTMLButtonElement>("ground-course"),
+  } satisfies Record<Ground, HTMLButtonElement>,
   simTime: element<HTMLSpanElement>("sim-time"),
   streamFps: element<HTMLSpanElement>("stream-fps"),
   motors: element<HTMLDivElement>("motors"),
@@ -58,7 +63,10 @@ let status: StatusMessage = {
   jumping: false,
   steerable: false,
   command_limits: [0, 0, 0, 0],
+  ground: "flat",
 };
+const GROUNDS: Ground[] = ["flat", "park", "course"];
+let groundRequested: Ground | null = null; // a switch in progress (takes ~1 s)
 const hasPolicy = (): boolean =>
   status.walk_policy !== "" || status.stand_policy !== "" || status.getup_policy !== "" || status.jump_policy !== "";
 /** The policy a mode would use ("" = can't): stand mode falls back on the get-up policy. */
@@ -137,6 +145,11 @@ function applyStatus(next: StatusMessage): void {
         : `${mode === "walk" ? "Walk" : "Stand: stays upright in place, gets up after falls"} (M switches)`;
   }
   ui.recovering.hidden = !status.recovering;
+  if (groundRequested === status.ground) groundRequested = null;
+  for (const ground of GROUNDS) {
+    ui.grounds[ground].classList.toggle("selected", status.ground === ground);
+    ui.grounds[ground].disabled = groundRequested !== null;
+  }
   steering.setStatus(status);
   ui.steering.hidden = !(status.steerable && status.mode === "walk");
   if (ui.steering.textContent === "") ui.steering.textContent = "Steering: W/S A/D Q/E, arrows or a gamepad";
@@ -173,6 +186,24 @@ function jump(): void {
   if (status.jump_policy !== "" && !status.recovering && !status.jumping) connection.send({ type: "jump" });
 }
 
+function setGround(ground: Ground): void {
+  if (ground === status.ground || groundRequested !== null) return;
+  groundRequested = ground;
+  for (const button of Object.values(ui.grounds)) button.disabled = true; // until the new scene is up
+  connection.send({ type: "set_ground", ground });
+  // If the server refuses (an error toast), don't stay locked.
+  window.setTimeout(() => {
+    if (groundRequested === ground) {
+      groundRequested = null;
+      applyStatus(status);
+    }
+  }, 10000);
+}
+
+function nextGround(): void {
+  setGround(GROUNDS[(GROUNDS.indexOf(status.ground) + 1) % GROUNDS.length]);
+}
+
 function toggleMode(): void {
   setMode(status.mode === "walk" ? "stand" : "walk");
 }
@@ -190,6 +221,9 @@ for (const [button, action] of [
   [ui.modeWalk, () => setMode("walk")],
   [ui.modeStand, () => setMode("stand")],
   [ui.jump, jump],
+  [ui.grounds.flat, () => setGround("flat")],
+  [ui.grounds.park, () => setGround("park")],
+  [ui.grounds.course, () => setGround("course")],
 ] as const) {
   button.addEventListener("click", () => {
     action();
@@ -277,13 +311,15 @@ window.addEventListener("keydown", (event) => {
     toggleMode();
   } else if (key === "j") {
     jump();
+  } else if (key === "g") {
+    nextGround();
   } else if (/^[1-9]$/.test(key)) {
     motors.applyPreset(Number(key) - 1);
   }
 });
 
 function updateHelp(): void {
-  const parts = ["<kbd>Space</kbd> play/pause", "<kbd>R</kbd> reset", "<kbd>F</kbd> follow"];
+  const parts = ["<kbd>Space</kbd> play/pause", "<kbd>R</kbd> reset", "<kbd>F</kbd> follow", "<kbd>G</kbd> ground"];
   if (hasPolicy()) parts.push("<kbd>P</kbd> policy/manual");
   if (policyFor("walk") !== "" && policyFor("stand") !== "") parts.push("<kbd>M</kbd> walk/stand");
   if (status.jump_policy !== "") parts.push("<kbd>J</kbd> jump");

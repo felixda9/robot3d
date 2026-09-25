@@ -14,6 +14,7 @@ import mujoco
 import numpy as np
 
 from robot3d.robots import load_model
+from robot3d.terrain import Terrain
 from robot3d.walk import WalkConfig, WalkTask
 
 
@@ -27,11 +28,17 @@ class WalkEnv(gym.Env):
 
     metadata = {"render_modes": []}  # we watch policies in the web viewer instead
 
-    def __init__(self, robot: str = "quadruped", config: WalkConfig | None = None):
+    def __init__(self, robot: str = "quadruped", config: WalkConfig | None = None, terrain: Terrain | None = None):
+        """terrain: the ground (default: config.terrain's layout, or the flat
+        floor). Episodes start on a random tile of it, facing a random way."""
         self.robot = robot
-        self.model = load_model(robot)
+        config = config or WalkConfig()
+        if terrain is None and config.terrain:
+            terrain = Terrain.make(config.terrain, config.terrain_seed)
+        self.terrain = terrain
+        self.model = load_model(robot, terrain)
         self.data = mujoco.MjData(self.model)
-        self.task = WalkTask(self.model, config or WalkConfig())
+        self.task = WalkTask(self.model, config, terrain=terrain)
         n = self.task.num_actions
         self.action_space = gym.spaces.Box(-1.0, 1.0, (n,), dtype=np.float32)
         self.observation_space = gym.spaces.Box(-np.inf, np.inf, (self.task.obs_size,), dtype=np.float32)
@@ -44,7 +51,10 @@ class WalkEnv(gym.Env):
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)  # seeds self.np_random
-        self.task.reset_state(self.data, self.np_random)
+        if self.task.randomizes_physics:
+            self.task.apply_physics(self.model, *self.task.sample_physics(self.np_random))
+        spawn = self.terrain.random_spawn(self.np_random) if self.terrain is not None and self.terrain.tiles else None
+        self.task.reset_state(self.data, self.np_random, spawn=spawn)
         self._last_action = np.zeros(self.task.num_actions)
         self._steps = 0
         self._start_xy = self.data.qpos[0:2].copy()
@@ -55,7 +65,7 @@ class WalkEnv(gym.Env):
         self._resample_command()
         self._feet_down = self.task.feet_state(self.data)[1]
         self._air_time = np.zeros(len(self.task.feet))
-        return self.task.observation(self.data, self._last_action, self.task.gait_phase(0), self._command), {}
+        return self._observe(), {}
 
     def step(self, action):
         task, model, data = self.task, self.model, self.data
@@ -117,7 +127,7 @@ class WalkEnv(gym.Env):
             last_action=self._last_action, up_z=up_z, fell=fell, foot_slip=foot_slip,
             feet_down=feet_down, landed=landed, air_time=air_time,
             foot_height=task.foot_heights(data), phase=task.gait_phase(self._steps + 1),  # the clock after this step
-            turn_rate=task.turn_rate(data), height=float(data.qpos[2]),
+            turn_rate=task.turn_rate(data), height=task.height(data),
             joint_offset=data.qpos[task.joint_qpos] - task.home_ctrl,
             joint_velocity=data.qvel[task.joint_qvel], angular_velocity=data.qvel[3:6], succeeded=succeeded,
             jump_airborne=airborne, jump_landed=self._landed, command=self._command,
@@ -125,7 +135,7 @@ class WalkEnv(gym.Env):
         self._last_action = action
         self._steps += 1
 
-        observation = task.observation(data, self._last_action, task.gait_phase(self._steps), self._command)
+        observation = self._observe()
         # A fall ends a walk/stand episode; getting up steadily ends a get-up one.
         terminated = (fell and task.config.terminate_on_fall) or succeeded
         truncated = self._steps >= task.max_steps
@@ -138,6 +148,11 @@ class WalkEnv(gym.Env):
             **{f"reward_{name}": value for name, value in terms.items()},
         }
         return observation, reward, terminated, truncated, info
+
+    def _observe(self) -> np.ndarray:
+        task = self.task
+        return task.observation(self.data, self._last_action, task.gait_phase(self._steps), self._command,
+                                rng=self.np_random)
 
     def _resample_command(self) -> None:
         """A new steering command (WalkConfig.commands), or walking straight at target_speed."""

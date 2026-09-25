@@ -240,6 +240,7 @@ def train_gpu(
     T, N = ppo.steps_per_env, ppo.num_envs
     net = ActorCritic(env.num_obs, env.num_actions, ppo.net_arch, ppo.init_std).to(dev)
     normalizer = ObsNormalizer(env.num_obs, ppo.clip_obs).to(dev)
+    extra = 0  # observations the checkpoint didn't have (appended at the end)
     if init_from is not None:
         saved = torch.load(init_from, map_location=dev, weights_only=False)
         if saved.get("format") != CHECKPOINT_FORMAT:
@@ -298,6 +299,13 @@ def train_gpu(
 
     rollout_log = RolloutLog(env.task.control_dt)
     obs = env.reset()
+    if extra:
+        # The old normalizer has counted millions of observations, so the new
+        # ones' mean/variance would barely move from 0/1: start them from
+        # this first batch instead (variance at least 0.05^2, e.g. a height
+        # map of mostly flat ground).
+        normalizer.mean[-extra:] = obs[:, -extra:].mean(0)
+        normalizer.var[-extra:] = obs[:, -extra:].var(0).clamp(min=0.05**2)
     normalizer.update(obs)
     steps = 0
     next_checkpoint = checkpoint_every

@@ -150,6 +150,14 @@ export interface FrameMessage {
  */
 export type Mode = "walk" | "stand";
 
+/**
+ * What the robot stands on. flat: the floor. park: the terrain training
+ * park ahead of the start (rows of harder and harder rough ground, slopes,
+ * stairs, obstacles). course: the test course, a lane of shapes the park
+ * never has. The robot always starts at the origin, on flat floor.
+ */
+export type Ground = "flat" | "park" | "course";
+
 /** Simulation run state. Sent on connect and whenever it changes. */
 export interface StatusMessage {
   type: "status";
@@ -174,6 +182,8 @@ export interface StatusMessage {
   steerable: boolean;
   /** Its command limits: max forward, backward, sideways (m/s), turn (rad/s); zeros if not steerable. */
   command_limits: [number, number, number, number];
+  /** What the robot stands on (SetGroundCommand). */
+  ground: Ground;
 }
 
 /** The server rejected a message from this client. */
@@ -306,6 +316,15 @@ export interface JumpCommand {
   type: "jump";
 }
 
+/**
+ * Put the robot on other ground. Rebuilds the simulation (every browser gets
+ * the new scene); loaded policies stay loaded, and the robot restarts at the origin.
+ */
+export interface SetGroundCommand {
+  type: "set_ground";
+  ground: Ground;
+}
+
 export type ClientMessage =
   | PlayCommand
   | PauseCommand
@@ -318,7 +337,8 @@ export type ClientMessage =
   | PushCommand
   | SetModeCommand
   | JumpCommand
-  | SetCommandCommand;
+  | SetCommandCommand
+  | SetGroundCommand;
 
 // ================================================================ HTTP API
 // The training dashboard reads runs over plain HTTP (JSON), not the

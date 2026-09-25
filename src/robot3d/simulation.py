@@ -14,6 +14,9 @@ import mujoco
 import numpy as np
 
 from robot3d.robots import load_model, reset_to_keyframe
+from robot3d.terrain import Terrain
+
+GROUNDS = ("flat", "park", "course")  # what the robot can stand on (terrain.py layouts)
 
 
 class Controller(Protocol):
@@ -50,10 +53,17 @@ class Simulation:
     GRAB_MAX_ACCEL = 3 * 9.81  # force cap = this x robot mass (3 g: can lift it, can't fling it)
     PUSH_SECONDS = 0.1  # a push is a force held this long: a quick shove
 
-    def __init__(self, robot: str = "quadruped", keyframe: str = "home", max_steps_per_advance: int = 50):
+    def __init__(self, robot: str = "quadruped", keyframe: str = "home", max_steps_per_advance: int = 50,
+                 ground: str = "flat"):
+        """ground: "flat" (the floor), or a terrain layout ("park", "course")
+        ahead of the start; the robot always starts at the origin, on flat floor."""
+        if ground not in GROUNDS:
+            raise ValueError(f"unknown ground {ground!r} (known: {', '.join(GROUNDS)})")
         self.robot = robot
         self.keyframe = keyframe
-        self.model = load_model(robot)
+        self.ground = ground
+        self.terrain = None if ground == "flat" else Terrain.make(ground)
+        self.model = load_model(robot, self.terrain)
         self.data = mujoco.MjData(self.model)
         # If the computer can't keep up (or a frame was delayed), take at most
         # this many physics steps per advance() and let the sim fall behind,

@@ -7,15 +7,19 @@ computes; tests/test_gpu_task.py compares the two on the same states.
 (Float32 here vs float64 there: they agree to ~1e-5.)
 """
 
+import numpy as np
 import torch
 
+from robot3d.terrain import GRID, HEIGHT_MAP_POINTS, TILE_GRID_HALF, Tile
 from robot3d.walk import WalkTask
 
 _DOWN = (0.0, 0.0, -1.0)
 
 
 class BatchedWalkTask:
-    def __init__(self, task: WalkTask, device: torch.device | str):
+    def __init__(self, task: WalkTask, device: torch.device | str, tiles: list[Tile] | None = None):
+        """tiles: the terrain tile pool (terrain.park_tiles); each robot stands
+        on one, centered at its origin (`self.tile` holds which, set by the env)."""
         self.task = task
         self.config = task.config
         self.device = torch.device(device)
@@ -50,6 +54,12 @@ class BatchedWalkTask:
         if self.config.fallen_start_fraction > 0:
             fallen_qpos, fallen_qvel = task.fallen_states
             self.fallen_qpos, self.fallen_qvel = tensor(fallen_qpos), tensor(fallen_qvel)
+        self.height_map_points = tensor(HEIGHT_MAP_POINTS)  # (P, 2)
+        self.spawn_footprint = tensor(task.SPAWN_FOOTPRINT)  # (F, 2)
+        # Terrain: every tile's height grid, (tiles, G, G) from -TILE_GRID_HALF
+        # in both directions; each robot's tile index (N,), or None (flat floor).
+        self.grids = tensor(np.stack([t.heights for t in tiles])) if tiles else None
+        self.tile: torch.Tensor | None = None
 
     # ----------------------------------------------------------------- actions
 
@@ -86,14 +96,16 @@ class BatchedWalkTask:
         last_action: torch.Tensor,
         phase: torch.Tensor | None = None,
         command: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """(N, obs_size) observations. torso_rot: (N, 3, 3) torso-to-world
-        rotations; phase: (N,) gait clock (gait_phase())."""
+        rotations; phase: (N,) gait clock (gait_phase()); generator: for the
+        height map's noise (None: exact)."""
         # R^T @ v for every robot: world directions -> torso frame.
         gravity = torch.einsum("nji,j->ni", torso_rot, torso_rot.new_tensor(_DOWN))
         linear_velocity = torch.einsum("nji,nj->ni", torso_rot, qvel[:, 0:3])
         parts = [
-            qpos[:, 2:3],
+            self.height(qpos)[:, None],
             gravity,
             linear_velocity,
             qvel[:, 3:6],
@@ -106,7 +118,78 @@ class BatchedWalkTask:
             parts.append(torch.stack([angle.sin(), angle.cos()], dim=1).float())
         if self.config.commands:
             parts.append(command if command is not None else torch.zeros((qpos.shape[0], 3), device=qpos.device))
+        if self.config.height_map:
+            parts.append(self.height_map(qpos, torso_rot, generator))
         return torch.cat(parts, dim=1)
+
+    def height_map(self, qpos: torch.Tensor, torso_rot: torch.Tensor,
+                   generator: torch.Generator | None = None) -> torch.Tensor:
+        """(N, P) like WalkTask.height_map; with a generator, plus height_map_noise."""
+        heading = torch.atan2(torso_rot[:, 1, 0], torso_rot[:, 0, 0])
+        c, s = heading.cos()[:, None], heading.sin()[:, None]
+        px, py = self.height_map_points[:, 0], self.height_map_points[:, 1]
+        x = qpos[:, 0:1] + c * px - s * py
+        y = qpos[:, 1:2] + s * px + c * py
+        values = (qpos[:, 2:3] - self.ground(x, y) - self.standing_height).clamp(-1.0, 1.0)
+        noise = self.config.height_map_noise
+        if generator is not None and noise > 0:
+            values = values + (2 * torch.rand(values.shape, generator=generator, device=values.device) - 1) * noise
+        return values
+
+    # ------------------------------------------------------------------ ground
+
+    def _grid_cells(self, x: torch.Tensor, y: torch.Tensor, tile: torch.Tensor | None):
+        """The 4 grid heights around each (x, y) point (shape (N, ...)) in its
+        robot's tile grid, the position between them, and off-the-grid."""
+        grids = self.grids
+        g = grids.shape[1]
+        fx = (x + TILE_GRID_HALF) / GRID
+        fy = (y + TILE_GRID_HALF) / GRID
+        i = fx.floor().long().clamp(0, g - 2)
+        j = fy.floor().long().clamp(0, g - 2)
+        outside = (fx < 0) | (fy < 0) | (fx > g - 1) | (fy > g - 1)
+        tile = (self.tile if tile is None else tile).view(-1, *([1] * (x.dim() - 1))).expand_as(i)
+        corners = (grids[tile, i, j], grids[tile, i + 1, j], grids[tile, i, j + 1], grids[tile, i + 1, j + 1])
+        return corners, (fx - i).clamp(0, 1), (fy - j).clamp(0, 1), outside
+
+    def ground(self, x: torch.Tensor, y: torch.Tensor, tile: torch.Tensor | None = None) -> torch.Tensor:
+        """Ground height under each robot's (x, y) points (N, ...), bilinear
+        in its tile's grid (WalkTask.ground); 0 on flat floor or off the tile.
+        tile: (N,) tile per row (default: self.tile, one per robot)."""
+        if self.grids is None:
+            return torch.zeros_like(x)
+        (h00, h10, h01, h11), tx, ty, outside = self._grid_cells(x, y, tile)
+        value = h00 * (1 - tx) * (1 - ty) + h10 * tx * (1 - ty) + h01 * (1 - tx) * ty + h11 * tx * ty
+        return torch.where(outside, torch.zeros_like(value), value)
+
+    def ground_max(self, x: torch.Tensor, y: torch.Tensor, tile: torch.Tensor | None = None) -> torch.Tensor:
+        """The highest grid point around each (x, y) (WalkTask.ground_max)."""
+        if self.grids is None:
+            return torch.zeros_like(x)
+        (h00, h10, h01, h11), _, _, outside = self._grid_cells(x, y, tile)
+        value = torch.maximum(torch.maximum(h00, h10), torch.maximum(h01, h11))
+        return torch.where(outside, torch.zeros_like(value), value)
+
+    def height(self, qpos: torch.Tensor) -> torch.Tensor:
+        """(N,) torso height above the ground right below it."""
+        return qpos[:, 2] - self.ground(qpos[:, 0:1], qpos[:, 1:2])[:, 0]
+
+    def place(self, qpos: torch.Tensor, qvel: torch.Tensor, x: torch.Tensor, y: torch.Tensor,
+              yaw: torch.Tensor, tile: torch.Tensor) -> None:
+        """WalkTask.place for n robots (in place), standing on their (n,) tiles."""
+        c, s = yaw.cos(), yaw.sin()
+        x0, y0 = qpos[:, 0].clone(), qpos[:, 1].clone()
+        qpos[:, 0] = c * x0 - s * y0 + x
+        qpos[:, 1] = s * x0 + c * y0 + y
+        fx = x[:, None] + self.spawn_footprint[:, 0]
+        fy = y[:, None] + self.spawn_footprint[:, 1]
+        qpos[:, 2] += self.ground_max(fx, fy, tile).amax(dim=1)
+        zero = torch.zeros_like(yaw)
+        turn = torch.stack([(yaw / 2).cos(), zero, zero, (yaw / 2).sin()], dim=1)
+        qpos[:, 3:7] = _quat_mul(turn, qpos[:, 3:7].clone())
+        vx, vy = qvel[:, 0].clone(), qvel[:, 1].clone()
+        qvel[:, 0] = c * vx - s * vy
+        qvel[:, 1] = s * vx + c * vy
 
     # -------------------------------------------------------------- gait clock
 
@@ -239,17 +322,17 @@ class BatchedWalkTask:
 
     def steady(self, qpos: torch.Tensor, torso_rot: torch.Tensor) -> torch.Tensor:
         """Same as WalkTask.steady, batched."""
-        return (self.up_z(torso_rot) > 0.94) & (qpos[:, 2] > 0.9 * self.standing_height)
+        return (self.up_z(torso_rot) > 0.94) & (self.height(qpos) > 0.9 * self.standing_height)
 
     def fell(self, qpos: torch.Tensor, torso_rot: torch.Tensor) -> torch.Tensor:
         c = self.config
-        return (self.up_z(torso_rot) < c.min_up_z) | (qpos[:, 2] < c.min_height_fraction * self.standing_height)
+        too_low = self.height(qpos) < c.min_height_fraction * self.standing_height
+        return (self.up_z(torso_rot) < c.min_up_z) | too_low
 
     def feet_state(self, geom_xpos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """((N, feet, 2) foot x/y, (N, feet) on the ground). geom_xpos: (N, ngeom, 3)."""
         pos = geom_xpos[:, self.feet]
-        on_ground = pos[..., 2] - self.foot_radius < WalkTask.FOOT_CONTACT_MARGIN
-        return pos[..., :2].clone(), on_ground
+        return pos[..., :2].clone(), self.foot_heights(geom_xpos) < WalkTask.FOOT_CONTACT_MARGIN
 
     def heading_velocity(self, torso_rot: torch.Tensor, vx: torch.Tensor, vy: torch.Tensor):
         """Same as WalkTask.heading_velocity, for (N,) velocities and (N, 3, 3) rotations."""
@@ -276,8 +359,9 @@ class BatchedWalkTask:
         return force, torch.cross(point - torso_com, force, dim=1)
 
     def foot_heights(self, geom_xpos: torch.Tensor) -> torch.Tensor:
-        """(N, feet) each foot's lowest point above the floor."""
-        return geom_xpos[:, self.feet, 2] - self.foot_radius
+        """(N, feet) each foot's lowest point above the ground under it."""
+        pos = geom_xpos[:, self.feet]
+        return pos[..., 2] - self.foot_radius - self.ground_max(pos[..., 0], pos[..., 1])
 
     def foot_slip(self, before, after) -> torch.Tensor:
         (xy0, down0), (xy1, down1) = before, after
@@ -304,3 +388,15 @@ class BatchedWalkTask:
             qpos = torch.where(fallen[:, None], self.fallen_qpos[pick], qpos)
             qvel = torch.where(fallen[:, None], self.fallen_qvel[pick], qvel)
         return qpos, qvel
+
+
+def _quat_mul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """(n, 4) Hamilton products a * b of (w, x, y, z) quaternions (like mju_mulQuat)."""
+    aw, ax, ay, az = a.unbind(dim=1)
+    bw, bx, by, bz = b.unbind(dim=1)
+    return torch.stack([
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    ], dim=1)

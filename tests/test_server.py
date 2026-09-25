@@ -342,3 +342,32 @@ def test_walk_and_stand_modes(tiny_run, tiny_stand_run, tiny_getup_run, tmp_path
 
 def test_root_page_responds(client):
     assert client.get("/").status_code == 200
+
+
+def test_switching_the_ground_keeps_the_policies(tiny_run):
+    with TestClient(create_app("quadruped", runs_dir=tiny_run.parent)) as client:
+        with client.websocket_connect("/ws") as ws:
+            flat_geoms = len(receive_until(ws, "scene").geoms)
+            assert receive_until(ws, "status").ground == "flat"
+            checkpoint = client.get("/api/runs/tiny").json()["checkpoints"][0]["name"]
+            ws.send_json({"type": "load_policy", "run": "tiny", "checkpoint": checkpoint})
+            receive_until(ws, "status", lambda s: s.walk_policy != "")
+            for ground in ("park", "course", "flat"):
+                ws.send_json({"type": "set_ground", "ground": ground})
+                scene = receive_until(ws, "scene")
+                assert (len(scene.geoms) > flat_geoms + 100) == (ground != "flat")  # terrain boxes, sent once
+                status = receive_until(ws, "status", lambda s: s.ground == ground)
+                assert status.walk_policy.startswith("tiny @ ") and status.policy_active
+                frame = receive_until(ws, "frame")
+                assert len(frame.xpos) == 3 * N_FRAME_GEOMS  # terrain is static: not in frames
+            ws.send_json({"type": "set_ground", "ground": "moon"})
+            assert "invalid message" in receive_until(ws, "error").message
+
+
+def test_a_terrain_policy_is_shown_on_the_park(tiny_terrain_run):
+    with TestClient(create_app("quadruped", runs_dir=tiny_terrain_run.parent)) as client:
+        with client.websocket_connect("/ws") as ws:
+            checkpoint = client.get("/api/runs/tiny_terrain").json()["checkpoints"][0]["name"]
+            ws.send_json({"type": "load_policy", "run": "tiny_terrain", "checkpoint": checkpoint})
+            status = receive_until(ws, "status", lambda s: s.walk_policy != "")
+            assert status.ground == "park" and status.steerable

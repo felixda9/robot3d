@@ -53,3 +53,21 @@ def tiny_jump_run(tmp_path_factory):
 @pytest.fixture(scope="session")
 def tiny_steer_run(tmp_path_factory):
     return _tiny_task_run(tmp_path_factory, "steer")
+
+
+@pytest.fixture(scope="session")
+def tiny_terrain_run(tmp_path_factory):
+    """A tiny real training run of the steerable walker on the terrain park
+    (8-motor robot, for speed): height map, randomized physics."""
+    from robot3d.walk import WalkConfig
+
+    return train(
+        total_steps=128,
+        n_envs=2,
+        name="tiny_terrain",
+        checkpoint_every=64,
+        walk=WalkConfig.steer().on_terrain(),
+        ppo=PPOConfig(n_steps=64, minibatches=2, n_epochs=1),
+        runs_dir=tmp_path_factory.mktemp("terrain_runs"),
+        verbose=0,
+    )

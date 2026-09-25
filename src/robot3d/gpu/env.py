@@ -9,18 +9,26 @@ data staying on the GPU:
   * The 10 physics steps per policy step are recorded once as a CUDA graph
     and replayed each step, which removes most per-kernel launch overhead.
   * Robots that fall or finish their 20 s restart on the spot ("auto-reset").
+  * On terrain (WalkConfig.terrain "park"), every robot has its own tile
+    (terrain.py): the model has MAX_TILE_BOXES placeholder boxes, and each
+    simulated world moves its tile's boxes into them (MuJoCo Warp lets box
+    poses and sizes differ per world). A robot gets a new tile at every
+    reset, at its curriculum level.
 """
 
+import math
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 import mujoco
 import mujoco_warp as mjw
+import numpy as np
 import torch
 import warp as wp
 
 from robot3d.gpu.task import BatchedWalkTask
 from robot3d.robots import load_model
+from robot3d.terrain import LEAVE_DISTANCE, LEVELS, MAX_TILE_BOXES, SPAWN_JITTER, TYPES, park_tiles
 from robot3d.walk import WalkConfig, WalkTask
 
 
@@ -72,10 +80,15 @@ class GpuWalkEnv:
             torch.cuda.synchronize(self.device)
             self.stream = torch.cuda.Stream(device=self.device)
             torch.cuda.set_stream(self.stream)
-        self.mjm = load_model(robot)
-        self.task = BatchedWalkTask(WalkTask(self.mjm, config or WalkConfig()), self.device)
+        config = config or WalkConfig()
+        if config.terrain not in ("", "park"):
+            raise ValueError(f"GPU training runs on terrain 'park' or flat (''), not {config.terrain!r}")
+        self.tiles = park_tiles(config.terrain_seed, config.terrain_variants) if config.terrain else None
+        self.mjm = load_model(robot, box_slots=MAX_TILE_BOXES if self.tiles else 0)
+        self.task = BatchedWalkTask(WalkTask(self.mjm, config), self.device, self.tiles)
         self.num_obs = self.task.obs_size
         self.num_actions = self.task.num_actions
+        randomizes_physics = self.task.task.randomizes_physics
 
         wp.init()
         self.wp_device = wp.get_device(device)
@@ -83,6 +96,15 @@ class GpuWalkEnv:
         mujoco.mj_forward(self.mjm, mjd)
         with wp.ScopedDevice(self.wp_device):
             self.m = mjw.put_model(self.mjm)
+            # Model values that differ per robot get one row per world
+            # (MuJoCo Warp reads row world % rows): each robot's terrain boxes,
+            # and its randomized physics.
+            if self.tiles:
+                for name in ("geom_size", "geom_aabb", "geom_rbound"):
+                    self._per_world(name)
+            if randomizes_physics:
+                for name in ("geom_friction", "body_mass", "actuator_gainprm", "actuator_biasprm"):
+                    self._per_world(name)
             # Contact/constraint buffers per world: standing = 4 foot contacts;
             # a robot lying on the floor touches it with torso and legs.
             self.d = mjw.put_data(self.mjm, mjd, nworld=num_envs, nconmax=32, njmax=128)
@@ -127,6 +149,61 @@ class GpuWalkEnv:
         self._feet_before: tuple[torch.Tensor, torch.Tensor] | None = None
         self.air_time = torch.zeros((num_envs, len(self.task.feet)), device=self.device)
         self._graph = None
+        if self.tiles:
+            self._setup_terrain()
+        if randomizes_physics:
+            self.friction = wp.to_torch(self.m.geom_friction)  # (N, ngeom, 3)
+            self.body_mass = wp.to_torch(self.m.body_mass)  # (N, nbody)
+            self.gainprm = wp.to_torch(self.m.actuator_gainprm)  # (N, nu, 10)
+            self.biasprm = wp.to_torch(self.m.actuator_biasprm)  # (N, nu, 10)
+            nominal = self.task.task.nominal_physics
+            self._nominal_mass = float(nominal["mass"])
+            self._nominal_gain = torch.as_tensor(nominal["gain"], dtype=torch.float32, device=self.device)
+            self._nominal_bias = torch.as_tensor(nominal["bias"], dtype=torch.float32, device=self.device)
+
+    def _per_world(self, name: str) -> None:
+        """Give model field `name` one row per world (a copy of the shared row)."""
+        shared = getattr(self.m, name)
+        rows = np.repeat(shared.numpy(), self.num_envs, axis=0)
+        setattr(self.m, name, wp.array(rows, dtype=shared.dtype, device=self.wp_device))
+
+    def _setup_terrain(self) -> None:
+        """The tile pool as tensors, and each robot's terrain type and level."""
+        tiles, dev, n = self.tiles, self.device, self.num_envs
+        slots = MAX_TILE_BOXES
+        pos = np.zeros((len(tiles), slots, 3))
+        pos[..., 2] = -1.0  # unused slots: tiny boxes under the floor
+        mat = np.tile(np.eye(3), (len(tiles), slots, 1, 1))
+        size = np.full((len(tiles), slots, 3), 0.01)
+        most = max(len(t.spawns) for t in tiles)
+        spawns = np.zeros((len(tiles), most, 2))
+        for i, tile in enumerate(tiles):
+            for k, box in enumerate(tile.boxes):
+                pos[i, k], mat[i, k], size[i, k] = box.center, box.rotation, box.half
+            spawns[i, :len(tile.spawns)] = tile.spawns
+
+        def tensor(x, dtype=torch.float32):
+            return torch.as_tensor(x, dtype=dtype, device=dev)
+
+        self.tile_pos, self.tile_mat, self.tile_size = tensor(pos), tensor(mat), tensor(size)
+        self.tile_spawns = tensor(spawns)
+        self.tile_spawn_count = tensor([len(t.spawns) for t in tiles], torch.long)
+        self.slot_geoms = tensor([self.mjm.geom(f"terrain_slot{k}").id for k in range(slots)], torch.long)
+        # Views of the per-world box poses (static geoms: MuJoCo Warp computes
+        # them once, so we set them) and sizes/bounds (used by collisions).
+        self.geom_xmat = wp.to_torch(self.d.geom_xmat)  # (N, ngeom, 3, 3)
+        self.geom_size = wp.to_torch(self.m.geom_size)  # (N, ngeom, 3)
+        self.geom_aabb = wp.to_torch(self.m.geom_aabb)  # (N, ngeom, 2, 3): box center, half-sizes
+        self.geom_rbound = wp.to_torch(self.m.geom_rbound)  # (N, ngeom): bounding sphere radius
+        # Terrain curriculum (legged_gym's): each robot keeps a terrain type,
+        # and its level goes up when it walks off its tile, down when it falls
+        # or gets stuck. Levels start low; a robot past the top level gets a
+        # random one, so the easy ones aren't forgotten.
+        self.terrain_type = torch.randint(0, len(TYPES), (n,), generator=self.generator, device=dev)
+        start = self.task.config.terrain_start_level
+        self.level = torch.randint(0, start + 1, (n,), generator=self.generator, device=dev)
+        self.task.tile = torch.zeros(n, dtype=torch.long, device=dev)
+        self.command_distance = torch.zeros(n, device=dev)  # how far the commands asked it to walk this episode
 
     # -------------------------------------------------------------- stepping
 
@@ -187,7 +264,8 @@ class GpuWalkEnv:
 
     def observe(self) -> torch.Tensor:
         phase = self.task.gait_phase(self.episode_length)
-        return self.task.observation(self.qpos, self.qvel, self.xmat[:, 1], self.last_action, phase, self.command)
+        return self.task.observation(self.qpos, self.qvel, self.xmat[:, 1], self.last_action, phase, self.command,
+                                     self.generator)
 
     def step(self, actions: torch.Tensor) -> StepResult:
         task = self.task
@@ -254,7 +332,7 @@ class GpuWalkEnv:
             feet_down=feet_down, landed=landed, air_time=air_at_landing,
             foot_height=task.foot_heights(self.geom_xpos),
             phase=task.gait_phase(self.episode_length + 1),  # the clock after this step
-            turn_rate=task.turn_rate(self.qvel), height=self.qpos[:, 2],
+            turn_rate=task.turn_rate(self.qvel), height=task.height(self.qpos),
             joint_offset=self.qpos[:, task.joint_qpos] - task.home_ctrl,
             joint_velocity=self.qvel[:, task.joint_qvel], angular_velocity=self.qvel[:, 3:6],
             succeeded=succeeded, jump_airborne=airborne, jump_landed=self.landed, command=self.command,
@@ -266,6 +344,20 @@ class GpuWalkEnv:
         fall_ends = fell & task.config.terminate_on_fall
         terminated = fall_ends | succeeded
         time_out = (self.episode_length >= task.max_steps) & ~terminated
+        stats = {}
+        if self.tiles:
+            # Walked off its tile: the episode ends like a time-out (the task
+            # would go on; PPO estimates the rest), and a harder tile follows.
+            walked = (self.qpos[:, 0:2] - self.start_xy).norm(dim=1)
+            left = (walked > LEAVE_DISTANCE) & ~terminated
+            self.command_distance += self.command[:, 0:2].norm(dim=1) * task.control_dt
+            stuck = time_out & (walked < (0.5 * self.command_distance).clamp(max=1.0))
+            self.level += (left.long() - (fall_ends | stuck).long())
+            beyond = self.level >= LEVELS
+            random_level = torch.randint(0, LEVELS, (self.num_envs,), generator=self.generator, device=self.device)
+            self.level = torch.where(beyond, random_level, self.level).clamp(min=0)
+            time_out = time_out | left
+            stats["curriculum/terrain_level"] = self.level.float().mean()
         done = terminated | time_out
         if c.push_curriculum_max > 0:
             # Survived a whole episode: harder shoves; fell: easier (see WalkConfig).
@@ -285,7 +377,8 @@ class GpuWalkEnv:
             episode_length=self.episode_length[done].clone(),
             episode_distance=self._distance(self.qpos[done, 0:2] - self.start_xy[done]),
             episode_fell=fall_ends[done].clone(),
-            stats={"curriculum/push_max_speed": self.push_level.mean()} if c.push_curriculum_max > 0 else None,
+            stats=({"curriculum/push_max_speed": self.push_level.mean()} if c.push_curriculum_max > 0 else {})
+            | stats or None,
         )
         self._feet_before = feet_after
         if done.any():
@@ -304,10 +397,16 @@ class GpuWalkEnv:
     def _reset_robots(self, mask: torch.Tensor) -> None:
         """Restart the robots in `mask` (bool (N,)) standing, like WalkTask.reset_state."""
         n = int(mask.sum())
+        if self.tiles:
+            self._new_tiles(mask)
+        if self.task.task.randomizes_physics:
+            self._randomize_physics(mask)
         self.reset_mask.copy_(mask)
         with self._warp():
             mjw.reset_data(self.m, self.d, reset=self._reset_mask)  # clears their state, time, warmstart
         qpos, qvel = self.task.reset_state(n, self.generator)
+        if self.tiles:
+            self._spawn(mask, qpos, qvel)
         self.qpos[mask] = qpos
         self.qvel[mask] = qvel
         self.ctrl[mask] = self.task.home_ctrl
@@ -327,6 +426,54 @@ class GpuWalkEnv:
         self.push_left[mask] = 0
         self.xfrc[mask] = 0.0
         self.next_push[mask] = self._push_delays(self.num_envs)[mask]
+        if self.tiles:
+            self.command_distance[mask] = 0.0
+
+    def _rand(self, *shape) -> torch.Tensor:
+        return torch.rand(shape, generator=self.generator, device=self.device)
+
+    def _new_tiles(self, mask: torch.Tensor) -> None:
+        """A random tile of each masked robot's type and level, moved into its world's box slots."""
+        variants = self.task.config.terrain_variants
+        variant = (self._rand(self.num_envs) * variants).long().clamp(max=variants - 1)
+        tile = (self.level * len(TYPES) + self.terrain_type) * variants + variant
+        self.task.tile = torch.where(mask, tile, self.task.tile)
+        worlds = mask.nonzero()[:, 0:1]  # (n, 1)
+        tile = self.task.tile[worlds[:, 0]]
+        slots = self.slot_geoms[None, :]  # (1, K)
+        self.geom_xpos[worlds, slots] = self.tile_pos[tile]
+        self.geom_xmat[worlds, slots] = self.tile_mat[tile]
+        self.geom_size[worlds, slots] = self.tile_size[tile]
+        self.geom_aabb[worlds, slots, 0] = 0.0
+        self.geom_aabb[worlds, slots, 1] = self.tile_size[tile]
+        self.geom_rbound[worlds, slots] = self.tile_size[tile].norm(dim=-1)
+
+    def _spawn(self, mask: torch.Tensor, qpos: torch.Tensor, qvel: torch.Tensor) -> None:
+        """Move the masked robots' fresh standing states onto their tiles, as
+        terrain.spawn_point draws: half at the middle, the rest at another spawn point; any heading."""
+        tile = self.task.tile[mask]
+        n = len(tile)
+        count = self.tile_spawn_count[tile]
+        other = 1 + (self._rand(n) * (count - 1)).long().clamp(max=(count - 2).clamp(min=0))
+        index = torch.where((self._rand(n) < 0.5) | (count == 1), torch.zeros_like(other), other)
+        xy = self.tile_spawns[tile, index] + (2 * self._rand(n, 2) - 1) * SPAWN_JITTER
+        yaw = (2 * self._rand(n) - 1) * math.pi
+        self.task.place(qpos, qvel, xy[:, 0], xy[:, 1], yaw, tile)
+
+    def _randomize_physics(self, mask: torch.Tensor) -> None:
+        """New friction, torso mass and motor strength for the masked robots (WalkTask.sample_physics)."""
+        c = self.task.config
+        worlds = mask.nonzero()[:, 0]
+        n = len(worlds)
+
+        def uniform(low, high):
+            return low + (high - low) * self._rand(n)
+
+        self.friction[worlds, :, 0] = uniform(c.friction_min, c.friction_max)[:, None]
+        self.body_mass[worlds, 1] = self._nominal_mass + uniform(c.added_mass_min, c.added_mass_max)
+        strength = uniform(c.motor_strength_min, c.motor_strength_max)
+        self.gainprm[worlds, :, 0] = self._nominal_gain * strength[:, None]
+        self.biasprm[worlds, :, 1:3] = self._nominal_bias * strength[:, None, None]
 
     def _distance(self, displacement: torch.Tensor) -> torch.Tensor:
         """Like WalkTask.distance, for (n, 2) displacements."""

@@ -82,3 +82,35 @@ What other projects and papers do, gathered by research agents from primary sour
   Reward height/air time and a steady upright landing. Rough estimate from
   the motors (±10 N·m, 0.32 m legs, 7.2 kg): 10–20 cm clearance. Ask the
   user which kind (straight up / forward / on command) when starting.
+- **Walking on any ground (2026-09-25)**. The user asked whether to train
+  on each obstacle, or whether something more general lets a robot go
+  anywhere. (From known papers, not a fresh web survey.)
+  - Nobody trains one skill per obstacle: **one policy is trained on a
+    broad random mix of ground**, with a curriculum that makes it harder
+    as the policy improves. The generalization comes from the diversity,
+    randomized physics, and feeling the ground.
+  - legged_gym (Rudin et al. 2021, "Learning to walk in minutes"): 4096
+    ANYmals on a 10 x 20 grid of tiles: smooth and rough slopes, stairs up
+    and down, discrete obstacles. Rows are difficulty levels; a robot moves
+    up after walking more than half its tile, down after falling short. A
+    height scan of 187 points. ~20 min on one GPU.
+  - Lee et al. 2020 (ANYmal, Science Robotics): a **blind** policy
+    (proprioception history, a teacher with privileged terrain info
+    distilled into it). Trained on procedural hills, steps and stairs with
+    an adaptive curriculum. It then walked on mud, snow, rubble, vegetation
+    and running water it had never seen.
+  - RMA (Kumar et al. 2021): trained only on fractal bumpy ground with
+    randomized mass, friction and motor strength, plus an adaptation
+    module (it infers the ground and physics from recent history). It
+    worked on sand, mud, grass, hiking trails and stairs.
+  - Miki et al. 2022 (ANYmal hiking in the Alps): a height map **and**
+    proprioception, trained with deliberately corrupted maps, so the
+    robot learns when to trust what it sees and when to rely on what it
+    feels. The current standard.
+  - What we took from them (terrain.py): one mixed park with a per-robot
+    level curriculum; every tile random within its level; a noisy height
+    map (2 cm); per-robot random friction (0.4–1.25), payload (−0.5..+1.5
+    kg) and motor strength (±15%) on top of the pushes; a held-out test
+    course of shapes the park never has, to measure generalization.
+    Possible next steps: height-map dropout or corruption (Miki), and a
+    history input for "feeling" the ground (RMA, Lee).

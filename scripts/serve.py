@@ -16,6 +16,7 @@ import uvicorn
 
 from robot3d.robots import available_robots
 from robot3d.server import create_app
+from robot3d.simulation import GROUNDS
 
 
 def main() -> None:
@@ -24,6 +25,8 @@ def main() -> None:
                         help="default: quadruped, or the robot the --policy was trained on")
     parser.add_argument("--keyframe", default="home", help="keyframe to start from and reset to")
     parser.add_argument("--policy", help="run folder (uses its newest checkpoint) or checkpoint .zip")
+    parser.add_argument("--ground", choices=GROUNDS, default="flat",
+                        help="what the robot stands on: the floor, the terrain park or the test course")
     parser.add_argument("--host", default="127.0.0.1", help="use 0.0.0.0 to allow other devices on your network")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
@@ -36,7 +39,7 @@ def main() -> None:
 
             robot = find_checkpoint(args.policy).run_info()["robot"]
 
-    app = create_app(robot, args.keyframe, policy=args.policy)
+    app = create_app(robot, args.keyframe, policy=args.policy, ground=args.ground)
     if args.policy:
         behaviors = app.state.runner.behaviors
         print(f"Policy: {behaviors.labels} (mode: {behaviors.mode})")

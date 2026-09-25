@@ -814,3 +814,87 @@ CLAUDE.md keeps the current state and the lessons; this file keeps the why.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after
   each milestone commit.
 
+
+## 2026-09-25: Terrain (milestone 7, part 2)
+
+- User's choices: all four terrain types (rough ground, slopes, stairs,
+  obstacles); a height map for perception; quadruped12 first. Asked
+  mid-build whether to train per obstacle: no. One policy on a random mix,
+  as legged_gym, Lee 2020, RMA and Miki 2022 do (docs/research.md). The plan
+  gained randomized tiles, randomized physics, a noisy height map and a
+  held-out test course.
+- **Everything is boxes** (terrain.py). A height field was as slow as boxes
+  on the GPU and gives one contact per pair. Boxes can be turned (yaw) and
+  tilted (pitch/roll), for ramps and tilted rubble slabs.
+- **Speed on the GPU (4096 quadruped12s, shared GPU):**
+  - flat: 2.34M physics steps/s;
+  - the whole 736-box park in every world: 0.38M. The broadphase checks
+    every robot geom against every box (~13k pairs per robot); the
+    sweep-and-prune broadphases were slower still (0.11–0.12M);
+  - **per-world tiles: 1.66M (71% of flat).** MuJoCo Warp lets model
+    fields differ per world (`worldid % rows`), and static geoms get their
+    pose once at `put_data` and never again. So the GPU model has 25
+    placeholder boxes, and each world writes its own tile into them
+    (`d.geom_xpos`/`geom_xmat`, plus per-world `m.geom_size`/`geom_aabb`/
+    `geom_rbound`). `reset_data` doesn't touch them.
+- **Tiles** (3 m, ≤ 25 boxes, centered at 0,0):
+  - rough: 5 x 5 slabs, each at its own height and tilt (up to 8 cm, 8°);
+  - slope: a ridge along x with ramps to ±y (up to 25°);
+  - stairs: a pyramid of nested boxes (2–12 cm steps, 25–35 cm treads);
+  - obstacles: 10 turned blocks (up to 12 cm).
+  - Slopes and stairs have a 0.25 m floor border. Robots start on top
+    (walk down) or just outside the tile at the foot (walk up); starting
+    on the border straddled the first step, and one robot tipped over.
+  - Difficulty = (level + U(0,1)) / 10: every level is a band, never one
+    fixed value.
+- **GPU pool:** 10 levels x 4 types x 5 variants = 200 tiles. Each robot
+  keeps a terrain type (like legged_gym's columns). At every reset it gets a
+  random tile of its type and level.
+  - Curriculum: up a level after walking 1.2 m from its start (which ends
+    the episode like a time-out, so PPO bootstraps); down after a fall, or
+    a time-out having walked less than half of what the commands asked
+    (capped at 1 m).
+  - Past the top level: a random level, so easy ones aren't forgotten.
+    Robots start at levels 0–3.
+- **Heights from the ground below:** a 2 cm height grid, rasterized once
+  (matches MuJoCo's rays: median 0 mm, 99% within 3 mm away from edges).
+  - Torso height (obs[0]), falls, steady and the rewards use bilinear
+    lookups.
+  - Feet use the highest of the 4 grid points around them (a foot on a
+    stair's edge is on the step).
+  - On flat ground everything is 0, so old runs are unchanged (tests pass).
+- **Height map:** 13 x 7 points, 8 cm apart, from 32 cm behind to 64 cm
+  ahead and ±24 cm sideways, in the heading frame. Value = torso height
+  above that point − standing height (0 on flat ground), clipped at ±1 m,
+  plus 2 cm noise in training. Appended at the end of the observation, so
+  `--init` can widen a flat walker onto it.
+- **Fine-tuning onto new inputs:** the new inputs' normalizer statistics
+  start from the first batch. The old normalizer has counted ~10^11 samples,
+  so otherwise they'd stay at mean 0, variance 1 forever.
+- **Randomized physics** (`on_terrain()`), per robot and episode:
+  friction 0.4–1.25 (every geom, since a contact uses the larger value),
+  torso payload −0.5..+1.5 kg, motor kp/kv ±15%. On the GPU these are
+  per-world model rows; on the CPU the env sets the model at reset.
+  Evaluation and skill tests use nominal physics and an exact map.
+- **Bug found by the CPU/GPU parity test:** the settled standing state was
+  made at the origin of the terrain model. On a single-tile layout that is
+  on top of the stairs, so the standing height came out 22 cm high. States
+  made at the origin now use `WalkTask.flat_model` (terrain boxes don't
+  collide).
+- **Viewer:** a Ground selector (Flat / Park / Course, key G) rebuilds the
+  simulation on a worker thread. Loaded policies stay (retargeted: same
+  network, new task). Loading a terrain-trained policy while on flat floor
+  switches to the park. The park starts 1.5 m ahead of the origin, levels
+  along +x, so walking forward means harder ground.
+- **Skill test for terrain runs:** the test course (~20 m: turned rubble,
+  12°/20° ramps with a plateau, a 9 cm step, 6 cm narrow-tread stairs, a
+  stepping field, a 10° cross-slope). A pilot steers forward at 0.4 m/s back
+  toward the lane's center line; skill = the share walked before falling
+  (4 tries, 90 s max).
+- jump12_m20 (20 N·m, running starts, 50M): from standing +16–17 cm, 0.3 s
+  airborne, feet up to 21–22 cm, landing tilt 24–30°; while walking +12–21
+  cm, sometimes with a small second hop.
+- steer12_m20 at 62.5M: forward 0.43 (asked 0.5), back 0.17 (0.3),
+  sideways 0.18 (0.3), turn 0.84 (0.8) rad/s, stands still at zero.
+- humanoid_walk (100M): no falls in 5 x 20 s, but only 0.16 m/s (target
+  0.4); push test 53% at 190/380 N.

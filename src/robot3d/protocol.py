@@ -85,6 +85,7 @@ class FrameMessage(_Message):
 
 
 Mode = Literal["walk", "stand"]
+Ground = Literal["flat", "park", "course"]
 
 
 class StatusMessage(_Message):
@@ -100,6 +101,7 @@ class StatusMessage(_Message):
     jumping: bool
     steerable: bool
     command_limits: tuple[float, float, float, float]
+    ground: Ground
 
 
 class ErrorMessage(_Message):
@@ -192,6 +194,11 @@ class SetCommandCommand(_Message):
     turn: FiniteFloat
 
 
+class SetGroundCommand(_Message):
+    type: Literal["set_ground"] = "set_ground"
+    ground: Ground
+
+
 ClientMessage = Annotated[
     PlayCommand
     | PauseCommand
@@ -204,7 +211,8 @@ ClientMessage = Annotated[
     | PushCommand
     | SetModeCommand
     | JumpCommand
-    | SetCommandCommand,
+    | SetCommandCommand
+    | SetGroundCommand,
     Field(discriminator="type"),
 ]
 

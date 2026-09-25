@@ -57,11 +57,13 @@ only); Node 24, Vite 8, TypeScript 7, three.js 0.186.
 - `uv sync`; `cd web; npm install` — install
 - `uv run pytest` — all tests (GPU tests skip without CUDA; the protocol test
   needs `web/node_modules`)
-- `uv run scripts/serve.py` — server on :8000 (`--robot`, `--policy runs/<name>`)
+- `uv run scripts/serve.py` — server on :8000 (`--robot`, `--policy runs/<name>`,
+  `--ground flat|park|course`)
 - `cd web; npm run dev` — page on http://localhost:5173 (Simulator + Training tabs)
 - `uv run scripts/train_gpu.py` — GPU training: `--robot`, `--task
   walk|steer|stand|getup|jump`, `--steps`, `--name`, `--init <run>` (fine-tune,
-  also onto appended inputs), `--gait-hz`, `--trainer ppo|rsl`
+  also onto appended inputs), `--terrain` (park + height map + random physics),
+  `--gait-hz`, `--trainer ppo|rsl`
 - `uv run scripts/train.py` — CPU training (SB3; the original walker)
 - `uv run scripts/evaluate.py runs/<name> [--all]` — headless evaluation + skill test
 - `uv run scripts/view_mujoco.py` — MuJoCo's own viewer
@@ -73,7 +75,10 @@ only); Node 24, Vite 8, TypeScript 7, three.js 0.186.
 robots/            quadruped.xml (8 motors), quadruped12.xml (12, 20 N·m), humanoid.xml (21)
 src/robot3d/
   walk.py          WalkConfig (all task settings; walk/steer/stand/getup/jump presets,
-                   ROBOT_SETTINGS) + WalkTask (observation, action, reward, pushes)
+                   on_terrain(), ROBOT_SETTINGS) + WalkTask (observation, action, reward,
+                   pushes, heights above the ground, height map, physics randomization)
+  terrain.py       box tiles (rough/slope/stairs/obstacles), park + test course layouts,
+                   height grids
   envs.py          WalkEnv (Gymnasium)          gpu/task.py  BatchedWalkTask (walk.py in torch)
   gpu/env.py       GpuWalkEnv (MuJoCo Warp)     gpu/ppo.py   our PPO + TorchPolicy
   gpu/rsl.py       RSL-RL reference trainer     gpu/common.py  run folders, logging
@@ -111,12 +116,14 @@ runs/<name>/       training output (gitignored): run.json, tb/, checkpoints/
 - [x] 5b GPU training: MuJoCo Warp + our PPO, ~50k steps/s, parity-tested
   against CPU MuJoCo; GPU policies play in the CPU viewer.
 - [x] 5c Robustness: mouse grab/push; 12-motor robot; shove-robust walking;
-  Walk/Stand modes with automatic get-up; jump on J. (Higher jump with the
-  20 N·m motors: `jump12_m20` training.)
+  Walk/Stand modes with automatic get-up; jump on J (`jump12_m20`: +16 cm,
+  also mid-walk).
 - [ ] 6 Robot designer — **postponed by the user**.
-- [ ] 7 Environments & commands. Part 1, **steering** (keyboard/gamepad): built,
-  `steer12_m20` training. Part 2, **terrain**: next.
-- [ ] 8 Humanoid (child-size, 21 motors): robot built, `humanoid_walk` training.
+- [ ] 7 Environments & commands. Part 1, **steering** (keyboard/gamepad):
+  done (`steer12_m20`). Part 2, **terrain**: built (park, test course,
+  height map, randomized physics, Ground selector); `terrain12` training.
+- [ ] 8 Humanoid (child-size, 21 motors): robot built; `humanoid_walk` walks
+  without falling but slowly (0.16 of 0.4 m/s).
 
 ## The robots
 
@@ -134,11 +141,12 @@ their saved settings (`WalkConfig.from_run`), so old runs replay as trained.
 | task | preset | best run | how good |
 |---|---|---|---|
 | walk | `WalkConfig()` | `walk12_robust` | 0.39 m/s trot-walk, 1.5 Hz gait clock; survives 3 m/s shoves 87% (20 N·m) |
-| steer | `.steer()` | `steer12_m20` (training) | commands: forward −0.3..0.6, sideways ±0.3 m/s, turn ±1 rad/s; zero = stand |
+| steer | `.steer()` | `steer12_m20` | forward 0.46 of 0.5, back 0.20 of 0.3, sideways 0.12 of 0.3 m/s (weak), turn 0.82 of 0.8 rad/s; zero = stand |
+| steer on terrain | `.steer().on_terrain()` | `terrain12` (training) | skill = share of the held-out test course walked |
 | stand | `.stand()` | `stand12_push` | as still as the bare motors in the home pose, all feet down; viewer pushes 8/8 at 80 N |
 | getup | `.getup()` | `getup12_v3` | up from every tested fallen pose (upside down with legs anywhere), ~1.1 s |
-| jump | `.jump()` | `jump12` (10 N·m); `jump12_m20` training | 8/8 jumps, torso +14 cm; new one: higher, and mid-walk |
-| walk (humanoid) | `.for_robot("humanoid")` | `humanoid_walk` (training) | — |
+| jump | `.jump()` | `jump12_m20` | torso +16–17 cm, feet up 21 cm; mid-walk +12–21 cm; landing tilt up to 30° |
+| walk (humanoid) | `.for_robot("humanoid")` | `humanoid_walk` | no falls, 0.16 m/s (target 0.4); pushes 53% at 190/380 N |
 
 Key recipe facts (details and numbers in `docs/decisions.md`):
 - GPU PPO: 4096 robots × 24 steps, adaptive learning rate (RSL-RL's), actor and
@@ -150,11 +158,18 @@ Key recipe facts (details and numbers in `docs/decisions.md`):
 - Stand: stillness terms only below 0.5 m/s, viewer-style force pushes,
   stance reward, reward floor at 0. Getup: MuJoCo Playground's recipe
   (relative actions, 60% fallen starts, fixed 6 s episodes).
+- Terrain (M7): one policy on a random mix, as legged_gym/ANYmal/RMA do
+  (docs/research.md). GPU: each robot has its own 3 m tile, written into 25
+  per-world box slots (the whole park in every world was 6x slower); new
+  random tile at every reset; level up after walking 1.2 m off it, down
+  after a fall. Heights count from the ground below (2 cm height grid).
+  13 x 7 height map (2 cm noise); random friction, payload, motor strength.
 - Viewer behaviors (`policy.Behaviors`): Walk/Stand modes; the get-up policy
   takes over after a fall until level (<20°) and high (≥90%) for 0.5 s; J
   starts a jump; steering keys drive a steerable walker.
 - Dashboard "best" = highest **skill test** (v3): walk/stand 32 viewer-style
-  pushes (72/144 N); getup 24 hard fallen starts; jump 8 jumps (+ height).
+  pushes (72/144 N); getup 24 hard fallen starts; jump 8 jumps (+ height);
+  terrain runs: the share of the test course walked (steered along it).
 
 ## Lessons (each cost a training run)
 
@@ -173,9 +188,11 @@ Key recipe facts (details and numbers in `docs/decisions.md`):
 ## Current status
 
 2026-09-25:
-- **Training on the GPU:**
-  - `jump12_m20` (higher jump, 20 N·m, running starts)
-  - `steer12_m20` (steering)
-  - `humanoid_walk` (100M steps)
-- **Next:** milestone 7 part 2, terrain.
-- **Tests:** 156 passing, `tsc` clean.
+- **Training on the GPU:** `terrain12` (steer12_m20 fine-tuned on the park
+  with the height map and random physics, 150M steps, ~55 min).
+- **Done today:** jump12_m20, steer12_m20, humanoid_walk (see tables);
+  terrain built and tested (docs/decisions.md, "Terrain").
+- **Next:** check terrain12 on the test course and in the viewer (Ground:
+  Park / Course); then the stand policy on uneven ground, and the humanoid
+  on terrain.
+- **Tests:** 172 passing, `tsc` clean.

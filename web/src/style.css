@@ -100,6 +100,12 @@ body {
   display: none;
 }
 
+.ground-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .policy-label {
   font-size: 11px;
   text-transform: uppercase;

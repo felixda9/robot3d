@@ -42,6 +42,15 @@ const CURVES: CurveChart[] = [
     yMax: 1,
   },
   {
+    tag: "curriculum/terrain_level",
+    title: "Terrain level",
+    subtitle: "Terrain runs: the robots' average park level (0 = nearly flat, 9 = the hardest row). Rises as they master harder ground.",
+    format: fixed(2),
+    tickFormat: fixed(0),
+    yMin: 0,
+    yMax: 9,
+  },
+  {
     tag: "time/fps",
     title: "Training speed",
     subtitle: "Environment steps per second, all parallel environments together (log scale: CPU vs GPU differ >10x).",

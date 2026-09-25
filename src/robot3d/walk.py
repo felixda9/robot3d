@@ -12,12 +12,15 @@ free-floating torso, every motor is a position actuator on a joint, and a
 "home" keyframe holds the standing pose's motor targets.
 """
 
+import copy
 import math
 from dataclasses import asdict, dataclass, fields
 from functools import cached_property
 
 import mujoco
 import numpy as np
+
+from robot3d.terrain import HEIGHT_MAP_POINTS, Terrain
 
 
 @dataclass(frozen=True)
@@ -205,6 +208,31 @@ class WalkConfig:
     success_bonus: float = 0.0
     success_seconds: float = 0.5
 
+    # --- terrain (M7, terrain.py). "" = the flat floor. "park": random park
+    # tiles; on the GPU each robot gets its own tile and a new one at every
+    # reset, at its curriculum level (up a level after walking off its tile,
+    # down after a fall or getting stuck). Heights in the observation, the
+    # fall test and the rewards count from the ground below, not from z = 0.
+    terrain: str = ""
+    terrain_seed: int = 0
+    terrain_variants: int = 5  # random tiles per level and type in the GPU pool
+    terrain_start_level: int = 3  # robots start at levels 0..this (of terrain.LEVELS)
+    # The policy sees the ground around it: per terrain.HEIGHT_MAP_POINTS
+    # point, how far below the torso the ground is, minus the standing height
+    # (0 everywhere on flat ground), like the height scan of legged_gym/ANYmal.
+    height_map: bool = False
+    height_map_noise: float = 0.0  # m: uniform noise per point and step (a real map is never exact)
+
+    # --- physics randomization, drawn per robot and episode (off at the
+    # defaults): no two robots alike, so the policy can't rely on exact
+    # values; RMA and ANYmal's walkers generalize to the real world this way.
+    friction_min: float = 1.0  # sliding friction of every contact
+    friction_max: float = 1.0
+    added_mass_min: float = 0.0  # kg on the torso (a payload)
+    added_mass_max: float = 0.0
+    motor_strength_min: float = 1.0  # x every motor's stiffness and damping (kp, kv)
+    motor_strength_max: float = 1.0
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -248,6 +276,24 @@ class WalkConfig:
         """Walking that follows steering commands (M7): forward/back, sideways
         and turning, or standing still at a zero command. Task "walk"."""
         return cls(commands=True, still_weight=1.0, turn_weight=1.0)
+
+    def on_terrain(self) -> "WalkConfig":
+        """These settings on the terrain park, seeing a height map, with
+        randomized physics (M7): for a walker that copes with any ground."""
+        from dataclasses import replace
+
+        return replace(
+            self,
+            terrain="park",
+            height_map=True,
+            height_map_noise=0.02,
+            friction_min=0.4,  # icy-ish to grippy rubber (legged_gym: 0.5-1.25)
+            friction_max=1.25,
+            added_mass_min=-0.5,  # 6.6 kg robot: -8% to +23%
+            added_mass_max=1.5,
+            motor_strength_min=0.85,
+            motor_strength_max=1.15,
+        )
 
     @classmethod
     def jump(cls) -> "WalkConfig":
@@ -392,9 +438,14 @@ ROBOT_SETTINGS: dict[str, dict[str, dict]] = {
 class WalkTask:
     """Model-specific constants plus the task's observation, action, and reward."""
 
-    def __init__(self, model: mujoco.MjModel, config: WalkConfig = WalkConfig(), keyframe: str = "home"):
+    def __init__(self, model: mujoco.MjModel, config: WalkConfig = WalkConfig(), keyframe: str = "home",
+                 terrain: Terrain | None = None):
+        """terrain: the boxes in `model` besides the robot (None: flat floor),
+        for heights above the ground. Whatever ground the robot is on, not
+        necessarily the one it trained on (the viewer can switch)."""
         self.model = model
         self.config = config
+        self.terrain = terrain
         self.decimation = max(1, round(config.control_dt / model.opt.timestep))
         self.control_dt = self.decimation * model.opt.timestep
         self.max_steps = round(config.episode_seconds / self.control_dt)
@@ -413,7 +464,9 @@ class WalkTask:
         # then with the gait clock: its phase as (sin, cos)
         self.clock = config.gait_frequency > 0
         # ... and with commands: the command (forward, sideways, turn)
-        self.obs_size = 1 + 3 + 3 + 3 + 3 * model.nu + (2 if self.clock else 0) + (3 if config.commands else 0)
+        # ... and with the height map: one height per terrain.HEIGHT_MAP_POINTS point
+        self.obs_size = (1 + 3 + 3 + 3 + 3 * model.nu + (2 if self.clock else 0) + (3 if config.commands else 0)
+                         + (len(HEIGHT_MAP_POINTS) if config.height_map else 0))
         # Phase advance per control step. Phases are computed from the integer
         # step count in float64 (here and on the GPU), so both agree exactly,
         # even right at a cycle boundary.
@@ -473,7 +526,7 @@ class WalkTask:
     # ------------------------------------------------------------- observation
 
     def observation(self, data: mujoco.MjData, last_action: np.ndarray, phase: float = 0.0,
-                    command: np.ndarray | None = None) -> np.ndarray:
+                    command: np.ndarray | None = None, rng: np.random.Generator | None = None) -> np.ndarray:
         """What the policy "feels", like a real robot's IMU and joint encoders
         (plus, with the gait clock, where in the stepping rhythm it is).
 
@@ -492,14 +545,104 @@ class WalkTask:
         angular_velocity = data.qvel[3:6]  # ... angular velocity already in the torso's frame
         joint_angles = data.qpos[self.joint_qpos] - self.home_ctrl  # relative to the standing pose
         joint_speeds = data.qvel[self.joint_qvel]
-        parts = [[data.qpos[2]], gravity, linear_velocity, angular_velocity, joint_angles, joint_speeds, last_action]
+        parts = [[self.height(data)], gravity, linear_velocity, angular_velocity, joint_angles, joint_speeds,
+                 last_action]
         if self.clock:
             # sin/cos rather than the raw phase: 0.99 and 0.01 are neighbors
             # on a circle, and the policy should see them as close.
             parts.append([np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)])
         if self.config.commands:
             parts.append(np.zeros(3) if command is None else command)
+        if self.config.height_map:
+            parts.append(self.height_map(data, rng))
         return np.concatenate(parts).astype(np.float32)
+
+    def height_map(self, data: mujoco.MjData, rng: np.random.Generator | None = None) -> np.ndarray:
+        """The ground around the robot (HEIGHT_MAP_POINTS, in its heading
+        frame): torso height above the ground at each point minus the
+        standing height, so 0 on flat ground, > 0 where the ground drops away,
+        < 0 at a step up. Clipped to +-1 m. With rng: plus height_map_noise."""
+        c, s = self.heading_cos_sin(data)
+        px, py = HEIGHT_MAP_POINTS[:, 0], HEIGHT_MAP_POINTS[:, 1]
+        x = data.qpos[0] + c * px - s * py
+        y = data.qpos[1] + s * px + c * py
+        values = np.clip(data.qpos[2] - self.ground(x, y) - self.standing_height, -1.0, 1.0)
+        noise = self.config.height_map_noise
+        if rng is not None and noise > 0:
+            values = values + rng.uniform(-noise, noise, len(values))
+        return values
+
+    # ------------------------------------------------------------------ ground
+
+    def ground(self, x, y) -> np.ndarray:
+        """Ground height at (x, y) (arrays ok): the terrain, or 0 (the floor)."""
+        if self.terrain is None:
+            return np.zeros(np.shape(x))
+        return self.terrain.ground_height(x, y)
+
+    def height(self, data: mujoco.MjData) -> float:
+        """Torso height above the ground right below it."""
+        return float(data.qpos[2] - self.ground(data.qpos[0], data.qpos[1]))
+
+    @staticmethod
+    def heading_cos_sin(data: mujoco.MjData) -> tuple[float, float]:
+        """cos, sin of the robot's heading: where its torso's x axis (nose) points, flattened."""
+        heading = math.atan2(data.xmat[1][3], data.xmat[1][0])  # xmat row-major: [1][3] = R[1, 0]
+        return math.cos(heading), math.sin(heading)
+
+    # A robot spawned somewhere stands on the highest ground under this
+    # footprint (x, y offsets, m): the quadrupeds' feet are within +-0.2 m.
+    SPAWN_FOOTPRINT = np.array([(x, y) for x in np.linspace(-0.25, 0.25, 5) for y in np.linspace(-0.25, 0.25, 5)])
+
+    def place(self, qpos: np.ndarray, qvel: np.ndarray, x: float, y: float, yaw: float) -> None:
+        """Move a state standing at the origin (in place) to (x, y), turned
+        to face `yaw`, standing on the ground there."""
+        c, s = math.cos(yaw), math.sin(yaw)
+        rot = np.array([[c, -s], [s, c]])
+        qpos[0:2] = rot @ qpos[0:2] + (x, y)
+        qpos[2] += float(np.max(self.ground_max(x + self.SPAWN_FOOTPRINT[:, 0], y + self.SPAWN_FOOTPRINT[:, 1])))
+        turn = np.array([math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)])
+        quat = np.zeros(4)
+        mujoco.mju_mulQuat(quat, turn, qpos[3:7].copy())
+        qpos[3:7] = quat
+        qvel[0:2] = rot @ qvel[0:2]  # world-frame linear velocity; the angular one (qvel[3:6]) is in the torso frame
+
+    def ground_max(self, x, y) -> np.ndarray:
+        """Like ground(), but the highest grid point around (x, y): for feet (Terrain.ground_height_max)."""
+        if self.terrain is None:
+            return np.zeros(np.shape(x))
+        return self.terrain.ground_height_max(x, y)
+
+    # ------------------------------------------------------ physics randomization
+
+    def sample_physics(self, rng: np.random.Generator) -> tuple[float, float, float]:
+        """(friction, added torso mass, motor strength) for one episode (WalkConfig)."""
+        c = self.config
+        return (rng.uniform(c.friction_min, c.friction_max), rng.uniform(c.added_mass_min, c.added_mass_max),
+                rng.uniform(c.motor_strength_min, c.motor_strength_max))
+
+    @property
+    def randomizes_physics(self) -> bool:
+        c = self.config
+        return (c.friction_min, c.friction_max, c.added_mass_min, c.added_mass_max, c.motor_strength_min,
+                c.motor_strength_max) != (1.0, 1.0, 0.0, 0.0, 1.0, 1.0)
+
+    @cached_property
+    def nominal_physics(self) -> dict[str, np.ndarray]:
+        """The model's own values of what sample_physics changes (read before any change)."""
+        m = self.model
+        return {"friction": m.geom_friction[:, 0].copy(), "mass": m.body_mass[1].copy(),
+                "gain": m.actuator_gainprm[:, 0].copy(), "bias": m.actuator_biasprm[:, 1:3].copy()}
+
+    def apply_physics(self, model: mujoco.MjModel, friction: float, added_mass: float, strength: float) -> None:
+        """Set a model's friction (all geoms: a contact uses the larger of its
+        two geoms' values), torso mass and motor gains (position actuators:
+        force = kp (target - q) - kv q', gainprm[0] = kp, biasprm[1:3] = -kp, -kv)."""
+        nominal = self.nominal_physics
+        model.geom_friction[:, 0] = friction
+        model.body_mass[1] = nominal["mass"] + added_mass
+        model.actuator_gainprm[:, 0] = nominal["gain"] * strength
+        model.actuator_biasprm[:, 1:3] = nominal["bias"] * strength
 
     # ---------------------------------------------------------------- commands
 
@@ -707,12 +850,12 @@ class WalkTask:
     def feet_state(self, data: mujoco.MjData) -> tuple[np.ndarray, np.ndarray]:
         """(x/y position of each foot, whether each foot is on the ground)."""
         pos = data.geom_xpos[self.feet]
-        on_ground = pos[:, 2] - self.foot_radius < self.FOOT_CONTACT_MARGIN
-        return pos[:, :2].copy(), on_ground
+        return pos[:, :2].copy(), self.foot_heights(data) < self.FOOT_CONTACT_MARGIN
 
     def foot_heights(self, data: mujoco.MjData) -> np.ndarray:
-        """Each foot's lowest point above the floor (m; ~0 when planted)."""
-        return data.geom_xpos[self.feet, 2] - self.foot_radius
+        """Each foot's lowest point above the ground under it (m; ~0 when planted)."""
+        pos = data.geom_xpos[self.feet]
+        return pos[:, 2] - self.foot_radius - self.ground_max(pos[:, 0], pos[:, 1])
 
     def foot_slip(self, before: tuple[np.ndarray, np.ndarray], after: tuple[np.ndarray, np.ndarray]) -> float:
         """Sum of squared sliding speeds (m/s)^2 of feet that stayed on the
@@ -744,7 +887,7 @@ class WalkTask:
         standing height (Lee et al. 2019's hand-off, scaled to this robot).
         Held for 0.5 s, the viewer hands back from the get-up policy to
         walking/standing."""
-        return self.up_z(data) > 0.94 and data.qpos[2] > 0.9 * self.standing_height
+        return self.up_z(data) > 0.94 and self.height(data) > 0.9 * self.standing_height
 
     @property
     def success_steps(self) -> int:
@@ -752,13 +895,15 @@ class WalkTask:
 
     def fell(self, data: mujoco.MjData) -> bool:
         too_tilted = self.up_z(data) < self.config.min_up_z
-        too_low = data.qpos[2] < self.config.min_height_fraction * self.standing_height
+        too_low = self.height(data) < self.config.min_height_fraction * self.standing_height
         return bool(too_tilted or too_low)
 
-    def reset_state(self, data: mujoco.MjData, rng: np.random.Generator, allow_fallen: bool = True) -> None:
+    def reset_state(self, data: mujoco.MjData, rng: np.random.Generator, allow_fallen: bool = True,
+                    spawn: tuple[float, float, float] | None = None) -> None:
         """Start an episode: standing pose + noise, motors targeting home. With
         fallen_start_fraction, some episodes start lying down instead (not
-        when allow_fallen is off, e.g. in the viewer)."""
+        when allow_fallen is off, e.g. in the viewer). spawn: (x, y, heading)
+        to start at, on the ground there (default: the origin, facing +x)."""
         mujoco.mj_resetData(self.model, data)
         c = self.config
         if allow_fallen and c.fallen_start_fraction > 0 and rng.uniform() < c.fallen_start_fraction:
@@ -775,6 +920,8 @@ class WalkTask:
             if c.start_speed_max > 0:
                 angle, speed = rng.uniform(0, 2 * np.pi), rng.uniform(0, c.start_speed_max)
                 data.qvel[0:2] += speed * np.array([np.cos(angle), np.sin(angle)])
+        if spawn is not None:
+            self.place(data.qpos, data.qvel, *spawn)
         data.ctrl[:] = self.home_ctrl
         mujoco.mj_forward(self.model, data)
 
@@ -787,7 +934,7 @@ class WalkTask:
         orientation with its joints held at random angles, and let it settle
         for a second. Most land on a side, back or belly; some on their feet."""
         rng = np.random.default_rng(0)
-        model = self.model
+        model = self.flat_model
         data = mujoco.MjData(model)
         qpos, qvel = [], []
         low, high = self.joint_range[:, 0], self.joint_range[:, 1]
@@ -807,10 +954,24 @@ class WalkTask:
         return np.array(qpos), np.array(qvel)
 
     def _settled_standing_state(self, keyframe: str) -> tuple[np.ndarray, np.ndarray]:
-        """Drop the robot from its keyframe and let it settle (1.5 s), once.
-        Episodes start from this state instead of mid-air."""
-        data = mujoco.MjData(self.model)
-        mujoco.mj_resetDataKeyframe(self.model, data, self.model.key(keyframe).id)
-        for _ in range(round(1.5 / self.model.opt.timestep)):
-            mujoco.mj_step(self.model, data)
+        """Drop the robot from its keyframe and let it settle (1.5 s), once, on
+        flat floor. Episodes start from this state instead of mid-air."""
+        model = self.flat_model
+        data = mujoco.MjData(model)
+        mujoco.mj_resetDataKeyframe(model, data, model.key(keyframe).id)
+        for _ in range(round(1.5 / model.opt.timestep)):
+            mujoco.mj_step(model, data)
         return data.qpos.copy(), data.qvel.copy()
+
+    @cached_property
+    def flat_model(self) -> mujoco.MjModel:
+        """The model with only the floor to stand on: terrain boxes (world
+        geoms other than planes) don't collide. For states made at the
+        origin, where a terrain tile may be."""
+        if self.terrain is None:
+            return self.model
+        model = copy.copy(self.model)
+        terrain = (model.geom_bodyid == 0) & (model.geom_type != mujoco.mjtGeom.mjGEOM_PLANE)
+        model.geom_contype[terrain] = 0
+        model.geom_conaffinity[terrain] = 0
+        return model

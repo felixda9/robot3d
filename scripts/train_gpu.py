@@ -7,6 +7,8 @@
     uv run scripts/train_gpu.py --task stand --robot quadruped12   # stand still, catch shoves
     uv run scripts/train_gpu.py --task getup --robot quadruped12   # get up after falls
     uv run scripts/train_gpu.py --robot quadruped12 --init runs/walk12_tidy   # fine-tune a walker
+    uv run scripts/train_gpu.py --task steer --robot quadruped12 --terrain --init runs/steer12_m20
+                                                   # rough ground, slopes, stairs; height map; random physics
 
 Needs an NVIDIA GPU and the CUDA build of PyTorch. Watch it in the web UI's
 Training tab (same metrics as CPU runs); replay any checkpoint from there, or
@@ -42,6 +44,8 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, help="passes over each rollout (default: trainer's own)")
     parser.add_argument("--minibatches", type=int, help="minibatches per epoch (default: trainer's own)")
     parser.add_argument("--init", help="fine-tune from this run (newest checkpoint) or .pt checkpoint (our PPO)")
+    parser.add_argument("--terrain", action="store_true",
+                        help="train on the terrain park with a height map and randomized physics (WalkConfig.on_terrain)")
     parser.add_argument("--gait-hz", type=float,
                         help=f"gait clock: steps per foot per second (default {WalkConfig.gait_frequency}; 0 = no clock)")
     args = parser.parse_args()
@@ -60,6 +64,8 @@ def main() -> None:
     walk = {"walk": WalkConfig, "steer": WalkConfig.steer, "stand": WalkConfig.stand, "getup": WalkConfig.getup,
             "jump": WalkConfig.jump}[args.task]()
     walk = walk.for_robot(args.robot)  # e.g. the humanoid's own settings (walk.ROBOT_SETTINGS)
+    if args.terrain:
+        walk = walk.on_terrain()
     if args.gait_hz is not None:
         walk = dataclasses.replace(walk, gait_frequency=args.gait_hz)
     common = dict(robot=args.robot, total_steps=int(args.steps), name=name, seed=args.seed,

@@ -11,6 +11,9 @@ which is also how GPU-trained policies are checked against the physics they
 weren't trained in (float32 MuJoCo Warp).
 """
 
+import copy
+import dataclasses
+import math
 import pickle
 from collections.abc import Callable
 
@@ -19,6 +22,7 @@ import numpy as np
 
 # Checkpoint discovery lives in runs.py (no PyTorch); re-exported here.
 from robot3d.runs import SKILL_TEST_VERSION, Checkpoint, find_checkpoint, list_checkpoints  # noqa: F401
+from robot3d.terrain import Terrain
 from robot3d.walk import WalkConfig, WalkTask
 
 
@@ -56,10 +60,12 @@ class PolicyController:
     (same WalkTask, same settings from the run's run.json).
     """
 
-    def __init__(self, checkpoint: Checkpoint, model: mujoco.MjModel):
+    def __init__(self, checkpoint: Checkpoint, model: mujoco.MjModel, terrain: Terrain | None = None):
+        """model, terrain: the simulation it drives, and the terrain boxes in
+        it (for heights above the ground and the height map)."""
         info = checkpoint.run_info()
         self.checkpoint = checkpoint
-        self.task = WalkTask(model, WalkConfig.from_run(info["walk_config"]))
+        self.task = WalkTask(model, WalkConfig.from_run(info["walk_config"]), terrain=terrain)
         self.decimation = self.task.decimation
         load = _load_torch if checkpoint.format == "torch" else _load_sb3
         self._predict, expected_obs = load(checkpoint)
@@ -79,6 +85,14 @@ class PolicyController:
     def reset(self) -> None:
         self.last_action = np.zeros(self.task.num_actions)
         self.steps = 0
+
+    def retargeted(self, model: mujoco.MjModel, terrain: Terrain | None) -> "PolicyController":
+        """The same policy (network shared, not reloaded) for another model of
+        the same robot, e.g. after the viewer switched the ground."""
+        other = copy.copy(self)
+        other.task = WalkTask(model, self.task.config, terrain=terrain)
+        other.reset()
+        return other
 
     def reset_state(self, data: mujoco.MjData) -> None:
         """Start like a training episode: standing, with the same small noise
@@ -103,8 +117,8 @@ def evaluate(checkpoint: Checkpoint, episodes: int = 5, seed: int = 0) -> list[d
     from robot3d.envs import WalkEnv  # here to keep `import robot3d.policy` light
 
     info = checkpoint.run_info()
-    env = WalkEnv(info["robot"], WalkConfig.from_run(info["walk_config"]))
-    controller = PolicyController(checkpoint, env.model)
+    env = WalkEnv(info["robot"], nominal(WalkConfig.from_run(info["walk_config"])))
+    controller = PolicyController(checkpoint, env.model, env.terrain)
     results = []
     task = env.task
     settle_steps = round(1.0 / task.control_dt)  # skip the first second (starting up) for gait numbers
@@ -135,6 +149,12 @@ def evaluate(checkpoint: Checkpoint, episodes: int = 5, seed: int = 0) -> list[d
             }
         )
     return results
+
+
+def nominal(config: WalkConfig) -> WalkConfig:
+    """A run's settings for testing it: exact height map, unrandomized physics."""
+    return dataclasses.replace(config, height_map_noise=0.0, friction_min=1.0, friction_max=1.0, added_mass_min=0.0,
+                               added_mass_max=0.0, motor_strength_min=1.0, motor_strength_max=1.0)
 
 
 def gait_numbers(feet_down: np.ndarray, task: WalkTask) -> dict:
@@ -202,6 +222,15 @@ class Behaviors:
             self.mode = task
         elif not self.has(self.mode):
             self.mode = "stand"
+        self.reset()
+
+    def retargeted(self, model: mujoco.MjModel, terrain: Terrain | None) -> dict[str, PolicyController]:
+        """The loaded policies, for another model of the same robot (PolicyController.retargeted)."""
+        return {task: policy.retargeted(model, terrain) for task, policy in list(self.policies.items())}
+
+    def swap(self, policies: dict[str, PolicyController]) -> None:
+        """Replace the loaded policies with these (from retargeted()); labels and mode stay."""
+        self.policies = dict(policies)
         self.reset()
 
     def has(self, mode: str) -> bool:
@@ -328,12 +357,12 @@ def skill_test(checkpoint: Checkpoint) -> dict:
         standing steady (WalkTask.steady) for 0.5 s within 10 s.
     Returns {"skill": share passed (0..1), "skill_test": what was tested}.
     """
-    import dataclasses
-
     from robot3d.envs import WalkEnv
 
     info = checkpoint.run_info()
-    config = dataclasses.replace(WalkConfig.from_run(info["walk_config"]), push_interval=0.0)
+    config = dataclasses.replace(nominal(WalkConfig.from_run(info["walk_config"])), push_interval=0.0)
+    if config.terrain:
+        return course_test(checkpoint, config)
     env = WalkEnv(info["robot"], config)
     controller = PolicyController(checkpoint, env.model)
     task, model, data = env.task, env.model, env.data
@@ -418,3 +447,41 @@ def skill_test(checkpoint: Checkpoint) -> dict:
     return {"skill": passed / len(starts),
             "skill_test": f"{SKILL_TEST_VERSION}: {len(starts)} fallen starts ({GETUP_TEST_UPSIDE_DOWN} upside down), "
                           "up within 10 s"}
+
+
+COURSE_TEST_TRIES = 4
+COURSE_TEST_SPEED = 0.4  # m/s forward command
+COURSE_TEST_SECONDS = 90.0
+
+
+def course_test(checkpoint: Checkpoint, config: WalkConfig) -> dict:
+    """The skill test of terrain runs: walk the held-out test course
+    (Terrain.course: shapes the training park never has), steered along its
+    lane like a person with a gamepad would: forward at COURSE_TEST_SPEED,
+    turning back toward the lane's center line. Skill = the share of the
+    course walked before falling or running out of time, averaged over
+    COURSE_TEST_TRIES tries (different small start noise)."""
+    from robot3d.envs import WalkEnv
+
+    course = Terrain.course()
+    env = WalkEnv(checkpoint.run_info()["robot"], dataclasses.replace(config, terrain="course"), terrain=course)
+    controller = PolicyController(checkpoint, env.model, course)
+    task, data = env.task, env.data
+    shares = []
+    for k in range(COURSE_TEST_TRIES):
+        env.reset(seed=k)
+        controller.reset()
+        for _ in range(round(COURSE_TEST_SECONDS / task.control_dt)):
+            if controller.steerable:
+                c, s = task.heading_cos_sin(data)
+                aim = math.atan2(-data.qpos[1], 1.0)  # back toward y = 0, within ~1 m
+                error = math.atan2(math.sin(aim - math.atan2(s, c)), math.cos(aim - math.atan2(s, c)))
+                command = [COURSE_TEST_SPEED, 0.0, float(np.clip(2.0 * error, -0.8, 0.8))]
+                controller.command = env._command = task.clamp_command(command)
+            env.step(controller.action(data))
+            if task.fell(data) or data.qpos[0] > course.length:
+                break
+        shares.append(min(max(data.qpos[0], 0.0) / course.length, 1.0))
+    return {"skill": float(np.mean(shares)),
+            "skill_test": f"{SKILL_TEST_VERSION}: test course ({course.length:.0f} m of unseen terrain), "
+                          f"share walked ({COURSE_TEST_TRIES} tries)"}

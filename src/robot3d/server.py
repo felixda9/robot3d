@@ -8,7 +8,8 @@ browsers over a WebSocket, and serves training runs to the dashboard.
 Every connected browser sees the same simulation, like one real robot seen
 from several screens. Any browser's commands (play/pause/reset, motor
 targets) affect all of them. Loading a policy trained on another robot
-switches the simulation to that robot, and every browser gets the new scene.
+switches the simulation to that robot, and every browser gets the new scene;
+so does switching the ground (flat floor, terrain park, test course).
 
 Threads:
   * The simulation runs on its own thread (SimRunner) at a steady 60 fps,
@@ -51,6 +52,7 @@ from robot3d.protocol import (
     ScalarsResponse,
     SetCommandCommand,
     SetCtrlCommand,
+    SetGroundCommand,
     SetModeCommand,
     StatusMessage,
     UsePolicyCommand,
@@ -70,9 +72,10 @@ from robot3d.runs import (
     run_summary,
     save_evaluation,
 )
-from robot3d.policy import Behaviors  # (policy.py imports PyTorch only when loading a checkpoint)
+from robot3d.policy import Behaviors, PolicyController  # (PyTorch loads only with a checkpoint)
 from robot3d.scene import SceneEncoder
 from robot3d.simulation import Controller, Simulation
+from robot3d.walk import WalkConfig
 
 log = logging.getLogger(__name__)
 
@@ -86,22 +89,45 @@ PublishFn = Callable[[str, bool], None]
 @dataclass(frozen=True)
 class InstallPolicy:
     """Internal command (not from the protocol): swap in a loaded policy,
-    and with `sim`, a new simulation first (the policy is for another robot)."""
+    and with `sim`, a new simulation first (another robot, or other ground).
+    `kept`: the policies already loaded, for the new simulation (same robot)."""
 
     controller: Controller
     label: str
     sim: Simulation | None = None
+    kept: dict[str, PolicyController] | None = None
 
 
-def load_policy(checkpoint: Checkpoint, sim: Simulation) -> InstallPolicy:
-    """Load a checkpoint to drive the simulation, or, if it was trained on
-    another robot, a new simulation of that robot (slow: loads PyTorch and
-    the network, so call it off the sim thread)."""
-    from robot3d.policy import PolicyController  # PyTorch: import only when needed
+@dataclass(frozen=True)
+class InstallGround:
+    """Internal command: a simulation of the same robot on other ground,
+    with the loaded policies (`kept`) moved over to it."""
 
-    trained_on = checkpoint.run_info()["robot"]
-    new_sim = None if trained_on == sim.robot else Simulation(trained_on)
-    return InstallPolicy(PolicyController(checkpoint, (new_sim or sim).model), checkpoint.label, new_sim)
+    sim: Simulation
+    kept: dict[str, PolicyController]
+
+
+def load_policy(checkpoint: Checkpoint, sim: Simulation, behaviors: Behaviors | None = None) -> InstallPolicy:
+    """Load a checkpoint to drive the simulation (slow: loads PyTorch and the
+    network, so call it off the sim thread). With a new simulation if it was
+    trained on another robot, or on terrain while the robot is on flat floor
+    (a terrain policy is shown on the park)."""
+    info = checkpoint.run_info()
+    trained_on = info["robot"]
+    ground = sim.ground
+    if ground == "flat" and WalkConfig.from_run(info["walk_config"]).terrain:
+        ground = "park"
+    if trained_on == sim.robot and ground == sim.ground:
+        return InstallPolicy(PolicyController(checkpoint, sim.model, sim.terrain), checkpoint.label)
+    new_sim = Simulation(trained_on, ground=ground)
+    kept = behaviors.retargeted(new_sim.model, new_sim.terrain) if behaviors and trained_on == sim.robot else None
+    return InstallPolicy(PolicyController(checkpoint, new_sim.model, new_sim.terrain), checkpoint.label, new_sim, kept)
+
+
+def switch_ground(ground: str, sim: Simulation, behaviors: Behaviors) -> InstallGround:
+    """The same robot on other ground, its policies moved over (call off the sim thread)."""
+    new_sim = Simulation(sim.robot, sim.keyframe, ground=ground)
+    return InstallGround(new_sim, behaviors.retargeted(new_sim.model, new_sim.terrain))
 
 
 class EvaluationQueue:
@@ -260,11 +286,17 @@ class SimRunner:
                         self.sim.release()
                     case PushCommand(geom=geom, point=point, direction=direction, force=force):
                         self.sim.push(geom, point, direction, force)
-                    case InstallPolicy(controller=controller, label=label, sim=new_sim):
+                    case InstallPolicy(controller=controller, label=label, sim=new_sim, kept=kept):
                         if new_sim is not None:
-                            self._switch_robot(new_sim)
+                            self._switch_sim(new_sim, kept)
                         self.behaviors.install(controller, label)
                         self.sim.set_controller(self.behaviors)  # drives now; robot restarts standing
+                        state_changed = True
+                    case InstallGround(sim=new_sim, kept=kept):
+                        driving = self.sim.controller_active
+                        self._switch_sim(new_sim, kept)
+                        if self.behaviors.policies:
+                            self.sim.set_controller(self.behaviors, active=driving)
                         state_changed = True
             except (ValueError, RuntimeError) as e:
                 # Checked on the event loop already; this only catches races,
@@ -272,11 +304,16 @@ class SimRunner:
                 log.warning("ignored %s: %s", type(command).__name__, e)
         return state_changed
 
-    def _switch_robot(self, sim: Simulation) -> None:
-        """Simulate another robot from now on; every browser gets its scene."""
+    def _switch_sim(self, sim: Simulation, kept: dict[str, PolicyController] | None) -> None:
+        """Simulate `sim` from now on (another robot or other ground); every
+        browser gets its scene. kept: the loaded policies, moved to it (same
+        robot); None: another robot, whose policies don't fit."""
         sim.paused = self.sim.paused
         self.sim = sim
-        self.behaviors = Behaviors()  # the old robot's policies don't fit this one
+        if kept is None:
+            self.behaviors = Behaviors()
+        else:
+            self.behaviors.swap(kept)
         self._encoder = SceneEncoder(sim.model, sim.robot)
         self.scene_json = self._encoder.scene(sim.data).model_dump_json()
         if self._publish is not None:
@@ -299,6 +336,7 @@ class SimRunner:
             jumping=b.jumping and self.sim.controller_active,
             steerable=b.steerable,
             command_limits=b.command_limits(),
+            ground=self.sim.ground,
         ).model_dump_json()
 
 
@@ -375,10 +413,12 @@ def create_app(
     keyframe: str = "home",
     policy: str | Path | None = None,
     runs_dir: Path = RUNS_DIR,
+    ground: str = "flat",
 ) -> FastAPI:
     """`policy`: a run folder (-> newest checkpoint) or checkpoint .zip to drive
-    the robot. `runs_dir`: where the dashboard finds training runs."""
-    sim = Simulation(robot, keyframe)
+    the robot. `runs_dir`: where the dashboard finds training runs. `ground`:
+    what the robot starts on (simulation.GROUNDS)."""
+    sim = Simulation(robot, keyframe, ground=ground)
     behaviors = Behaviors()
     if policy is not None:
         install = load_policy(find_checkpoint(policy), sim)
@@ -457,7 +497,7 @@ def create_app(
 
         def load() -> InstallPolicy:
             checkpoint = resolve_checkpoint(resolve_run(command.run, runs_dir), command.checkpoint)
-            return load_policy(checkpoint, runner.sim)
+            return load_policy(checkpoint, runner.sim, runner.behaviors)
 
         try:
             install = await asyncio.to_thread(load)
@@ -466,6 +506,17 @@ def create_app(
         except Exception as e:
             log.exception("loading policy failed")
             return f"could not load the policy: {e}"
+        runner.submit(install)
+        return None
+
+    async def set_ground_command(command: SetGroundCommand) -> str | None:
+        """Build the simulation on the new ground off the event loop (terrain
+        heights, the policies' standing states: ~1 s), then hand it over."""
+        try:
+            install = await asyncio.to_thread(switch_ground, command.ground, runner.sim, runner.behaviors)
+        except Exception as e:
+            log.exception("switching the ground failed")
+            return f"could not switch the ground: {e}"
         runner.submit(install)
         return None
 
@@ -498,6 +549,9 @@ def create_app(
                 problem = _refusal(command, runner)
                 if problem is None and isinstance(command, LoadPolicyCommand):
                     problem = await load_policy_command(command)
+                elif problem is None and isinstance(command, SetGroundCommand):
+                    if command.ground != runner.sim.ground:
+                        problem = await set_ground_command(command)
                 elif problem is None:
                     runner.submit(command)
                     if isinstance(command, (GrabCommand, ReleaseCommand)):
