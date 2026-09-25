@@ -57,7 +57,7 @@ class WalkEnv(gym.Env):
     def step(self, action):
         task, model, data = self.task, self.model, self.data
         action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
-        data.ctrl[:] = task.action_to_ctrl(action)
+        data.ctrl[:] = task.action_to_ctrl(action, data.qpos[task.joint_qpos])
 
         c = task.config
         if c.push_interval > 0 and self._steps >= self._next_push:

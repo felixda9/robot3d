@@ -51,9 +51,10 @@ class BatchedWalkTask:
 
     # ----------------------------------------------------------------- actions
 
-    def action_to_ctrl(self, actions: torch.Tensor) -> torch.Tensor:
+    def action_to_ctrl(self, actions: torch.Tensor, joint_pos: torch.Tensor | None = None) -> torch.Tensor:
         """(N, nu) actions in -1..1 -> (N, nu) motor targets (see WalkTask)."""
-        targets = self.home_ctrl + self.config.action_scale * actions.clamp(-1.0, 1.0)
+        base = joint_pos if self.config.action_mode == "relative" else self.home_ctrl
+        targets = base + self.config.action_scale * actions.clamp(-1.0, 1.0)
         return torch.maximum(torch.minimum(targets, self.ctrl_high), self.ctrl_low)
 
     # ------------------------------------------------------------- observation
@@ -125,6 +126,12 @@ class BatchedWalkTask:
         phase: (N,) float64."""
         c = self.config
         upright = up_z.clamp(0.0, 1.0) if c.posture_gating else torch.ones_like(up_z)  # see WalkConfig
+        if c.stillness_speed_gate > 0:
+            calm = (torch.sqrt(vx**2 + vy**2) < c.stillness_speed_gate).float()
+        else:
+            calm = torch.ones_like(vx)
+        is_up = (up_z > c.upright_gate).float()
+        at_height = (height > c.height_gate * self.standing_height).float()
         if self.clock:
             should_be_down = self.desired_down(phase)
             gait = (feet_down == should_be_down).float().mean(dim=1)
@@ -154,14 +161,17 @@ class BatchedWalkTask:
             "support": -c.support_weight * (feet_down.sum(dim=1) < 2).float(),
             "fall": -c.fall_penalty * fell.float() * float(c.terminate_on_fall),
             "height": c.height_weight * (height / self.standing_height).clamp(0.0, 1.0),
-            "pose": c.pose_weight * upright * torch.exp(-(joint_offset**2).sum(dim=1) / c.pose_sigma),
+            "pose": c.pose_weight * upright * calm * is_up * torch.exp(-(joint_offset**2).sum(dim=1) / c.pose_sigma),
             "down": -c.down_weight * fell.float(),
             "roll": -c.roll_weight * (joint_offset[:, self.roll_motors] ** 2).sum(dim=1),
             "success": c.success_bonus * (succeeded.float() if succeeded is not None else torch.zeros_like(vx)),
-            "joint_speed": -c.joint_speed_weight * (joint_velocity**2).sum(dim=1),
-            "wobble": -c.wobble_weight * (angular_velocity[:, 0] ** 2 + angular_velocity[:, 1] ** 2),
+            "joint_speed": -c.joint_speed_weight * calm * (joint_velocity**2).sum(dim=1),
+            "wobble": -c.wobble_weight * calm * (angular_velocity[:, 0] ** 2 + angular_velocity[:, 1] ** 2),
+            "orientation": c.orientation_weight * torch.exp(-4.0 * (1.0 - up_z)),
+            "hold": c.hold_weight * is_up * at_height * torch.exp(-0.5 * (action**2).sum(dim=1)),
         }
-        return torch.stack(list(terms.values())).sum(dim=0), terms
+        total = torch.stack(list(terms.values())).sum(dim=0)
+        return (total.clamp(min=0.0) if c.reward_floor else total), terms
 
     def air_time_update(self, prev_down: torch.Tensor, air_time: torch.Tensor, down: torch.Tensor):
         """Same as WalkTask.air_time_update, for (N, feet) tensors."""
@@ -177,7 +187,7 @@ class BatchedWalkTask:
 
     def steady(self, qpos: torch.Tensor, torso_rot: torch.Tensor) -> torch.Tensor:
         """Same as WalkTask.steady, batched."""
-        return (self.up_z(torso_rot) > 0.9) & (qpos[:, 2] > 0.8 * self.standing_height)
+        return (self.up_z(torso_rot) > 0.94) & (qpos[:, 2] > 0.9 * self.standing_height)
 
     def fell(self, qpos: torch.Tensor, torso_rot: torch.Tensor) -> torch.Tensor:
         c = self.config

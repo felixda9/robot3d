@@ -90,7 +90,7 @@ class PolicyController:
         return self.last_action
 
     def act(self, data: mujoco.MjData) -> None:
-        data.ctrl[:] = self.task.action_to_ctrl(self.action(data))
+        data.ctrl[:] = self.task.action_to_ctrl(self.action(data), data.qpos[self.task.joint_qpos])
 
 
 def evaluate(checkpoint: Checkpoint, episodes: int = 5, seed: int = 0) -> list[dict]:

@@ -27,7 +27,13 @@ class WalkConfig:
 
     # --- control
     control_dt: float = 0.02  # the policy acts at 50 Hz (every 10 physics steps of 2 ms)
-    action_scale: float = 0.5  # action +-1 = target +-0.5 rad around the home pose
+    action_scale: float = 0.5  # action +-1 = target +-0.5 rad (around the home pose, see action_mode)
+    # How actions become motor targets. "home": home pose + action_scale x
+    # action (walk, stand: action 0 = the standing pose). "relative": each
+    # joint's current angle + action_scale x action (getup: action 0 = hold
+    # still wherever you are). MuJoCo Playground's Go1/Spot getup and Lee et
+    # al. 2019 use relative actions; Playground found home-based ones worse.
+    action_mode: str = "home"
     episode_seconds: float = 20.0  # then the episode is cut off ("truncated")
 
     # --- reward: one number per control step; the policy learns to make the sum large.
@@ -83,6 +89,24 @@ class WalkConfig:
     # much" (the user), with only the torso's drift penalized.
     joint_speed_weight: float = 0.0  # per (rad/s)^2 of joint speed, summed over the motors
     wobble_weight: float = 0.0  # per (rad/s)^2 of torso tipping (angular velocity about its x and y axes)
+    # > 0 (m/s): pose, joint_speed and wobble apply only while the torso moves
+    # slower than this. Calm when left alone, free to step when shoved (Isaac
+    # Lab's Spot config gates at 0.5 m/s). stand12_calm, always penalized for
+    # moving, stood still but wouldn't step to catch a shove.
+    stillness_speed_gate: float = 0.0
+
+    # Getting up (MuJoCo Playground's Go1 getup recipe; 0 elsewhere):
+    orientation_weight: float = 0.0  # x exp(-4 (1 - up_z)): 1 level, 0.02 on its side, ~0 on its back
+    hold_weight: float = 0.0  # x exp(-0.5 |action|^2), once up (gates below): hold still (relative actions)
+    upright_gate: float = -1.0  # pose and hold count only while up_z > this (-1: always)
+    height_gate: float = 0.0  # hold counts only while the torso is above this x standing height
+
+    # Clip each step's total reward at 0 (legged_gym's only_positive_rewards,
+    # Playground). With penalties making a step's total negative, ending the
+    # episode early (falling) looks good: stand12_calm fell in ~85% of its
+    # training episodes. (Lee et al. 2019: unbounded costs make the agent
+    # "find it more rewarding to terminate".)
+    reward_floor: bool = False
 
     # Posture terms, for standing (0 while walking):
     height_weight: float = 0.0  # x torso height / standing height (capped at 1): be up
@@ -143,22 +167,31 @@ class WalkConfig:
             pose_sigma=0.1,  # tight: 0.05 rad off on every joint keeps 74% of it, 0.1 rad 30%
             joint_speed_weight=0.01,  # legs still (1 rad/s on all 12 joints: -0.12 per step)
             wobble_weight=0.5,  # torso still (tipping at 1 rad/s: -0.5 per step)
+            stillness_speed_gate=0.5,  # ... but only while not being shoved along
             smoothness_weight=0.1,
             roll_weight=0.0,  # the pose term covers the roll joints too
-            push_max_speed=1.5,  # standing still, it should take harder shoves than while walking
+            reward_floor=True,
+            push_max_speed=1.0,
         )
 
     @classmethod
     def getup(cls) -> "WalkConfig":
-        """The get-up task (5c): from lying on its side, back or belly, get up.
-        It only drives after a fall; the stand or walk policy takes over again
-        once the robot stands steady, so an episode ends right there, with a
-        success bonus. Every step spent fallen scores below zero, so getting
-        up sooner is better and lying still never pays.
+        """The get-up task (5c), MuJoCo Playground's Go1 getup recipe: from
+        lying on its side, back or belly, get up and hold still. It only drives
+        after a fall; the stand or walk policy takes over once it's steady.
 
-        (The runs stand12, stand12_gated, stand12_reach combined standing and
-        getting up; stand12_reach collapsed into lying on its belly: level,
-        so "upright", "still" and "don't turn" paid, and safe from shoves.)"""
+        - Relative actions (+-0.5 rad from the current angles): big movements
+          add up over steps; action 0 = hold still.
+        - 60% of episodes start fallen, 40% standing (so holding still once up
+          is learned too); fixed 6 s episodes. No success ending: with
+          positive rewards for standing, ending at success would throw away
+          the reward that follows it, punishing success.
+        - Rewards: orientation (level), height, standing pose once upright
+          (< ~10 deg), holding still once also at full height. Totals clipped
+          at 0. Lying still earns ~0.
+
+        (Earlier: stand12* combined standing and getting up; stand12_reach
+        collapsed into lying on its belly. getup12 ended episodes on success.)"""
         return cls(
             task="getup",
             target_speed=0.0,
@@ -168,22 +201,26 @@ class WalkConfig:
             gait_weight=0.0,
             clearance_weight=0.0,
             support_weight=0.0,
-            upright_weight=1.0,  # progress: level torso ...
-            height_weight=1.0,  # ... and height
-            # While fallen, upright + height <= 1.5 (fallen = tilted > 60 deg or
-            # below half height), so this makes every fallen step negative.
-            down_weight=2.5,
-            success_bonus=10.0,
+            action_mode="relative",
+            action_scale=0.5,
+            upright_weight=0.0,
+            orientation_weight=1.0,
+            height_weight=1.0,
+            pose_weight=1.0,
+            pose_sigma=2.0,  # exp(-0.5 |q - home|^2), as Playground
+            upright_gate=0.985,  # ~10 deg
+            hold_weight=1.0,
+            height_gate=0.95,
+            energy_weight=0.0005,
+            smoothness_weight=0.01,
+            slip_weight=0.0,
+            roll_weight=0.0,  # getting up needs the roll joints freely
             fall_penalty=0.0,
             terminate_on_fall=False,
-            fallen_start_fraction=1.0,  # every episode starts fallen
+            fallen_start_fraction=0.6,
             push_interval=0.0,
-            episode_seconds=10.0,
-            # Getting up takes big leg movements: actions reach +-2 rad around
-            # the standing pose (walking: +-0.5), about each joint's full range.
-            # (stand12_gated, at +-0.5: 0 of 46 got up from their back.)
-            action_scale=2.0,
-            roll_weight=0.0,  # getting up needs the roll joints freely
+            episode_seconds=6.0,
+            reward_floor=True,
         )
 
     @classmethod
@@ -273,15 +310,17 @@ class WalkTask:
 
     # ----------------------------------------------------------------- actions
 
-    def action_to_ctrl(self, action: np.ndarray) -> np.ndarray:
+    def action_to_ctrl(self, action: np.ndarray, joint_pos: np.ndarray | None = None) -> np.ndarray:
         """Policy action (each in -1..1) -> motor target angles.
 
-        Actions are offsets around the standing pose: action 0 = stand still.
-        Starting from a sensible pose makes learning much faster than letting
-        the policy pick raw angles from the whole joint range.
+        action_mode "home": offsets around the standing pose (action 0 = stand
+        there). Starting from a sensible pose makes learning much faster than
+        letting the policy pick raw angles from the whole joint range.
+        "relative": offsets from the joints' current angles (`joint_pos`).
         """
         action = np.clip(action, -1.0, 1.0)
-        return np.clip(self.home_ctrl + self.config.action_scale * action, self.ctrl_low, self.ctrl_high)
+        base = joint_pos if self.config.action_mode == "relative" else self.home_ctrl
+        return np.clip(base + self.config.action_scale * action, self.ctrl_low, self.ctrl_high)
 
     # ------------------------------------------------------------- observation
 
@@ -369,6 +408,10 @@ class WalkTask:
         """
         c = self.config
         upright = min(max(up_z, 0.0), 1.0) if c.posture_gating else 1.0  # see WalkConfig.posture_gating
+        # stillness_speed_gate: calm terms only while not being shoved along
+        calm = float(c.stillness_speed_gate <= 0 or math.hypot(vx, vy) < c.stillness_speed_gate)
+        is_up = float(up_z > c.upright_gate)
+        at_height = float(height > c.height_gate * self.standing_height)
         gait = clearance = 0.0
         if self.clock:
             should_be_down = self.desired_down(phase)
@@ -394,14 +437,17 @@ class WalkTask:
             "support": -c.support_weight * float(np.sum(feet_down) < 2),
             "fall": -c.fall_penalty if fell and c.terminate_on_fall else 0.0,
             "height": c.height_weight * min(max(height / self.standing_height, 0.0), 1.0),
-            "pose": c.pose_weight * upright * math.exp(-float(np.sum(joint_offset**2)) / c.pose_sigma),
+            "pose": c.pose_weight * upright * calm * is_up * math.exp(-float(np.sum(joint_offset**2)) / c.pose_sigma),
             "down": -c.down_weight * float(fell),
             "roll": -c.roll_weight * float(np.sum(joint_offset[self.roll_motors] ** 2)),
             "success": c.success_bonus * float(succeeded),
-            "joint_speed": -c.joint_speed_weight * float(np.sum(joint_velocity**2)),
-            "wobble": -c.wobble_weight * float(angular_velocity[0] ** 2 + angular_velocity[1] ** 2),
+            "joint_speed": -c.joint_speed_weight * calm * float(np.sum(joint_velocity**2)),
+            "wobble": -c.wobble_weight * calm * float(angular_velocity[0] ** 2 + angular_velocity[1] ** 2),
+            "orientation": c.orientation_weight * math.exp(-4.0 * (1.0 - up_z)),
+            "hold": c.hold_weight * is_up * at_height * math.exp(-0.5 * float(np.sum(action**2))),
         }
-        return float(sum(terms.values())), terms
+        total = float(sum(terms.values()))
+        return (max(total, 0.0) if c.reward_floor else total), terms
 
     def air_time_update(
         self, prev_down: np.ndarray, air_time: np.ndarray, down: np.ndarray
@@ -473,10 +519,11 @@ class WalkTask:
         return float(data.xmat[1][8])
 
     def steady(self, data: mujoco.MjData) -> bool:
-        """Standing up properly: torso level (within ~25 deg) and at > 80% of
-        standing height. Held for success_seconds, a get-up episode succeeds;
-        in the viewer, the get-up policy hands back to walking/standing."""
-        return self.up_z(data) > 0.9 and data.qpos[2] > 0.8 * self.standing_height
+        """Standing up properly: torso level within 20 deg and at >= 90% of
+        standing height (Lee et al. 2019's hand-off, scaled to this robot).
+        Held for 0.5 s, the viewer hands back from the get-up policy to
+        walking/standing."""
+        return self.up_z(data) > 0.94 and data.qpos[2] > 0.9 * self.standing_height
 
     @property
     def success_steps(self) -> int:

@@ -5,9 +5,8 @@ massively parallel environments the way legged_gym / RSL-RL do it:
   * many robots (4096) x few steps each (24) per rollout, instead of a few
     robots x many steps: 98k samples per update, collected in well under a
     second;
-  * a linearly decaying learning rate, and each update stops early once the
-    policy has moved far enough (KL divergence above 1.5 x target_kl), as in
-    SB3 and our fixed CPU runs;
+  * an adaptive learning rate (RSL-RL's schedule): after each minibatch,
+    smaller if the policy moved too far (KL divergence), larger if too little;
   * clipped value loss, per-minibatch advantage normalization, gradient
     clipping, time-limit bootstrapping.
 
@@ -43,14 +42,20 @@ class GpuPPOConfig:
     # (CPU runs: ~28k) and the policy stayed noisy.
     epochs: int = 10  # passes over each rollout
     minibatches: int = 8
-    # Learning rate: starts here, falls linearly to 0 by the end of the run,
-    # and each update stops early once the policy has moved target_kl (KL
-    # divergence). The same recipe fixed the CPU runs' instability. The first
-    # GPU runs used RSL-RL's adaptive rate instead (x1.5 / /1.5 per minibatch
-    # around KL 0.01): it swung between 1e-5 and 2e-3, and neighboring
-    # checkpoints alternated between walking well and barely moving.
-    learning_rate: float = 1e-3
-    target_kl: float = 0.02
+    # Learning rate schedule.
+    # "adaptive" (RSL-RL's, the default since stand12_calm): after each
+    #   minibatch, /1.5 if the policy moved more than 2 x desired_kl (exact
+    #   Gaussian KL), x1.5 if less than half, within [1e-5, 1e-2].
+    # "linear_kl_stop" (walk runs up to walk12_tidy): falls linearly to 0,
+    #   and an update stops once KL passes 1.5 x target_kl. It stalls when
+    #   the exploration noise gets small (KL grows as change^2 / std^2):
+    #   stand12_calm, at std 0.10, managed 1 of 80 planned steps per update
+    #   from 21M steps on. (The first GPU runs' troubles with "adaptive" came
+    #   from joint actor/critic gradient clipping, fixed since.)
+    lr_schedule: str = "adaptive"
+    learning_rate: float = 1e-3  # the starting rate
+    desired_kl: float = 0.01  # adaptive
+    target_kl: float = 0.02  # linear_kl_stop
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
@@ -320,7 +325,8 @@ def train_gpu(
             }
             old_std = net.log_std.exp().detach()
             batch = T * N // ppo.minibatches
-            lr = ppo.learning_rate * max(0.0, 1.0 - steps / total_steps)  # linear decay
+            if ppo.lr_schedule == "linear_kl_stop":
+                lr = ppo.learning_rate * max(0.0, 1.0 - steps / total_steps)  # linear decay
             for group in optimizer.param_groups:
                 group["lr"] = lr
             stats = {"kl": [], "approx_kl": [], "pg": [], "v": [], "ent": [], "clip": []}
@@ -345,7 +351,14 @@ def train_gpu(
                             + (old_std**2 + (mb["mean"] - dist.mean) ** 2) / (2 * std**2)
                             - 0.5
                         ).sum(-1).mean()
-                    if kl > 1.5 * ppo.target_kl:
+                    if ppo.lr_schedule == "adaptive":
+                        if kl > 2.0 * ppo.desired_kl:
+                            lr = max(1e-5, lr / 1.5)
+                        elif kl < 0.5 * ppo.desired_kl:
+                            lr = min(1e-2, lr * 1.5)
+                        for group in optimizer.param_groups:
+                            group["lr"] = lr
+                    elif kl > 1.5 * ppo.target_kl:
                         stopped_early = True
                         break
 

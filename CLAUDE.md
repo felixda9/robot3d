@@ -736,6 +736,48 @@ web/                    Vite + TypeScript + three.js frontend
   - no tracking / turn / pose / support terms (standing still is the
     stand policy's job); ±2 rad actions.
   Runs: `stand12_calm` (stand, 50M) and `getup12` (getup, 80M).
+- **2026-09-25: `stand12_calm` results and a PPO stall** (stopped at ~36M):
+  - Stillness (no shoves, 10 s): at 17.6M joint speed 0.006 rad/s, 3.6°
+    off home (the motors alone holding home: 2.1°, legs sag), torso
+    wobble 0.3 °/s, 5 cm drift: essentially the home pose, still.
+  - Shoves (16 directions): 20M 87 / 68 / 50 / 50 / 25 / 12% at
+    0.5 … 3.0 m/s; 30M 100 / 68 / 62 / 43 / 31 / 31%. Too stiff: it
+    doesn't step to catch itself (walk12_tidy: 100 / 100 / 93 / 81 / 62 / 18%).
+  - **Stall:** from 21M, `train/update_fraction` 0.013 = 1 of 80 planned
+    minibatch steps per update. Its std had shrunk to 0.10, and the exact
+    Gaussian KL grows as Δmean²/std², so one Adam step already passed the
+    early-stop threshold (1.5 × target_kl = 0.03); the logged KL is from
+    before that step (0). Learning stopped while the observation
+    normalizer kept updating, so behavior drifted: 26° off home at 32M.
+    (walk12_tidy reached std 0.097 but kept update_fraction 1.0: smaller
+    policy gradients.) → the KL early stop needs replacing (e.g. RSL-RL's
+    adaptive learning rate) or a floor; decided with the open-source survey.
+- **2026-09-25: Open-source survey → new stand/getup recipe** (user: "check
+  open sourced stuff and find how other people have done it"; details in
+  Notes for later milestones). Changes:
+  - PPO: `lr_schedule` "adaptive" (RSL-RL: after each minibatch lr /1.5 if
+    KL > 2 × 0.01, ×1.5 if < 0.005, within [1e-5, 1e-2]) is the new
+    default; "linear_kl_stop" stays selectable (the walk runs used it).
+  - `reward_floor`: each step's total clipped at 0 (legged_gym's
+    only_positive_rewards, Playground) for stand and getup. stand12_calm's
+    penalties made early steps negative, so falling (ending the episode)
+    looked good: ~85% of its training episodes ended in falls.
+  - Stand: `stillness_speed_gate` 0.5 m/s: pose, joint_speed and wobble
+    only while the torso moves slower (Isaac Lab's Spot): calm alone,
+    free to step when shoved. Shoves ≤ 1.0 m/s.
+  - Getup, MuJoCo Playground's Go1 getup: `action_mode` "relative" (target
+    = current angle + 0.5 × action; Playground found home-based worse);
+    60% of episodes from the fallen bank, 40% standing; fixed 6 s
+    episodes, no success ending (with positive standing rewards, ending
+    at success threw away the reward after it: getup12 had that flaw);
+    rewards `orientation` exp(−4(1 − up_z)), height, pose exp(−0.5|Δq|²)
+    once upright within ~10° (`upright_gate` 0.985), `hold`
+    exp(−0.5|a|²) once also at 95% height (`height_gate`); small energy
+    and smoothness penalties. (Relative actions: action 0 = no holding
+    force, so a robot doing nothing sags; the policy learns the offset.)
+  - Hand-off (WalkTask.steady): tilt < 20° and ≥ 90% height for 0.5 s
+    (was 25° / 80%), Lee et al.'s FSM scaled to this robot.
+  Runs: `stand12_v3`, `getup12_v3` (50M each).
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -759,9 +801,11 @@ web/                    Vite + TypeScript + three.js frontend
   Stand modes with the automatic switch are built and tested. Training now,
   `walk12_tidy` (+ roll penalty) is done: straight, mostly tidy, and far
   more shove-proof (see Decisions); waiting for the user's verdict on its
-  look. Standing and getting up are now separate tasks (the combined one
-  "moved way too much" and later collapsed); training: `stand12_calm` and
-  `getup12`.
+  look. Standing and getting up are separate tasks (the combined one
+  "moved way too much" and later collapsed). After an open-source survey
+  (user's request) the stand and getup recipes follow Isaac Lab's Spot and
+  MuJoCo Playground's Go1 getup, and PPO uses an adaptive learning rate.
+  Training: `stand12_v3` and `getup12_v3`.
 - `walk_cpu_fixed` (target_kl + lr decay + slip penalty):
   - 0 KL spikes (walk_10m: 114, max 50.5);
   - steady 1.0–1.28 m/s after 3M steps;
@@ -776,7 +820,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 130 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 133 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after
@@ -806,6 +850,36 @@ web/                    Vite + TypeScript + three.js frontend
     - all worlds converged; solver ~1.2–2.9 iterations.
     - For comparison, CPU training runs ~50k physics steps/s effective
       (5k env steps/s × 10 substeps).
+- **Open-source survey (2026-09-25), how others train standing and getting up**
+  (sources saved in the session scratchpad `research/`):
+  - MuJoCo Playground Go1 getup (`go1/getup.py`): relative actions
+    (q + 0.5a), Kp 35; 60% drops from 0.5 m with random orientation and
+    joints, 40% home; 0.5 s settle; 6 s episodes, no early end; reward
+    clip(Σ × dt, 0, ·): orientation 1, torso height 1 (capped), posture 1
+    (gated upright ~6°), stand_still exp(−0.5|a|²) 1 (gated upright and at
+    height), tiny penalties; 50M steps, ~9 min on an A100. Paper
+    curriculum: power cutoff 400 W, then finetune with a joint-velocity cost.
+  - Playground Go1 joystick: home + 0.5a; ends only upside down; standing
+    at zero command: stand_still −1 × Σ|q − home| and pose exp; pushes
+    are force pulses (off by default), Δv up to ~1 m/s.
+  - legged_gym: pushes overwrite base xy velocity U(±1) every 15 s;
+    stand_still exists but weight 0 in shipped configs; only positive
+    rewards; A1 action scale 0.25.
+  - Isaac Lab: additive velocity pushes ±0.5 m/s every 10–15 s;
+    rel_standing_envs 2–10%; Spot gates its standing penalties on
+    "command 0 and body speed < 0.5 m/s" (stand_still_scale 5).
+  - mjlab (MuJoCo Warp + RSL-RL, our stack): pushes every 1–3 s (xy ±0.5,
+    roll/pitch ±0.52); standing posture std 0.05 rad hip/thigh, 0.1 calf.
+  - walk-these-ways: no pushes; its contact schedule isn't gated at zero
+    command, so it marches in place (don't do that when standing).
+  - Lee, Hwangbo, Hutter 2019 (ANYmal, no code): three policies
+    (self-right, stand up, walk) + selector; bounded costs (unbounded ones
+    make terminating attractive); curriculum on smoothness costs; FSM:
+    recover if tilt > 35° or low, hand back after tilt < 20° for 0.5 s.
+    >97% success in 100+ real falls; one multi-skill policy gave
+    "frequent slippages and highly conservative postures".
+  - Smith et al. 2022 (A1, code public), AFR 2024 (Go1), HoST (humanoid,
+    upward assist force curriculum) for other get-up variants.
 - **Jumping** (user asked, 2026-09-25, after the stand policy works): a
   third behavior next to Walk and Stand, triggered by a key (J) in the
   viewer: crouch, jump, land on its feet, return to the mode it was in.

@@ -174,7 +174,7 @@ class GpuWalkEnv:
     def step(self, actions: torch.Tensor) -> StepResult:
         task = self.task
         actions = actions.clamp(-1.0, 1.0)
-        self.ctrl.copy_(task.action_to_ctrl(actions))
+        self.ctrl.copy_(task.action_to_ctrl(actions, self.qpos[:, task.joint_qpos]))
         c = task.config
         if c.push_interval > 0:
             # Shoves (see WalkConfig.push_interval), without a GPU->CPU sync:

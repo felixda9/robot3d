@@ -102,9 +102,13 @@ def test_getup_episodes_end_when_standing_steady_on_the_gpu():
     from robot3d.gpu.env import GpuWalkEnv
     from robot3d.walk import WalkConfig
 
-    env = GpuWalkEnv(num_envs=64, robot="quadruped12", config=WalkConfig.getup(), device="cuda:0", seed=2)
+    import dataclasses
+
+    # (the get-up task has success endings off; home actions so action 0 holds the pose)
+    config = dataclasses.replace(WalkConfig.getup(), success_bonus=10.0, action_mode="home")
+    env = GpuWalkEnv(num_envs=64, robot="quadruped12", config=config, device="cuda:0", seed=2)
     env.reset(randomize_episode_start=False)
-    assert env.task.fell(env.qpos, env.xmat[:, 1]).float().mean() > 0.6  # they start fallen
+    assert env.task.fell(env.qpos, env.xmat[:, 1]).float().mean() > 0.3  # 60% start from the fallen bank
     # Put them all on their feet: standing steady for success_seconds ends the episode with the bonus.
     env.qpos[:] = env.task.standing_qpos
     env.qvel[:] = 0.0

@@ -98,6 +98,15 @@ def test_action_to_ctrl_and_reward_match(snapshots):
     expected = np.stack([task.action_to_ctrl(a) for a in actions])
     torch.testing.assert_close(batched.action_to_ctrl(torch.tensor(actions, dtype=torch.float32)),
                                torch.tensor(expected, dtype=torch.float32))
+    # Relative actions (getup): around the current joint angles.
+    from robot3d.walk import WalkConfig, WalkTask
+
+    relative = WalkTask(task.model, WalkConfig.getup())
+    pose = rng.uniform(-1, 1, (N, task.num_actions))
+    expected = np.stack([relative.action_to_ctrl(a, q) for a, q in zip(actions, pose)])
+    got = BatchedWalkTask(relative, "cpu").action_to_ctrl(torch.tensor(actions, dtype=torch.float32),
+                                                          torch.tensor(pose, dtype=torch.float32))
+    torch.testing.assert_close(got, torch.tensor(expected, dtype=torch.float32))
 
     nfeet = len(task.feet)
     inputs = {
@@ -165,7 +174,9 @@ def test_air_time_update_matches(snapshots):
 
 
 @pytest.mark.parametrize(
-    "robot, kind", [("quadruped", "stand"), ("quadruped", "getup"), ("quadruped12", "getup"), ("quadruped12", "walk")]
+    "robot, kind",
+    [("quadruped", "stand"), ("quadruped", "getup"), ("quadruped12", "getup"), ("quadruped12", "walk"),
+     ("quadruped12", "stand")],
 )
 def test_reward_matches_for_other_tasks_and_robots(robot, kind):
     """The stand and get-up tasks, and the 12-motor robot (roll penalty)."""
@@ -173,6 +184,8 @@ def test_reward_matches_for_other_tasks_and_robots(robot, kind):
 
     config = WalkConfig() if kind == "walk" else getattr(WalkConfig, kind)()
     task = WalkTask(WalkEnv(robot).model, config)
+    # (inputs below: speeds up to ~0.7 m/s cross the stand task's 0.5 m/s gate,
+    # up_z in -1..1 and heights up to 0.35 m cross the get-up gates)
     batched = BatchedWalkTask(task, "cpu")
     rng = np.random.default_rng(4)
     nfeet = len(task.feet)
