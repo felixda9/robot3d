@@ -677,6 +677,21 @@ web/                    Vite + TypeScript + three.js frontend
   per step. → `posture_gating` (stand task): tracking, turn and pose are
   multiplied by clip(up_z, 0, 1), so lying earns nothing for keeping still
   and only getting up pays. Stopped at 10M; `stand12_gated` restarted.
+- **2026-09-25: `stand12_gated` learned to balance, not to get up**
+  (checked at 10M steps from 64 fallen poses, no shoves): on its back
+  0/46 up after 10 s, on its side 1/15, belly/feet 2/3; from standing
+  8/8 stayed up 20 s. (The fallen bank is ~72% "on its back".) Two
+  physical limits, not rewards:
+  1. actions reached only ±0.5 rad around the standing pose (the walk
+     setting): getting up needs big movements → the stand task uses
+     `action_scale` 2.0 (≈ each joint's full range);
+  2. on its back the legs couldn't reach the floor: with hip pitch up to
+     1.8 rad, swinging straight legs over lifts the torso 1 cm and no
+     more. → quadruped12 hip range −2.0..2.8 (was −1.0..1.8, like
+     ANYmal's far-swinging legs; they sit outside the torso's width). At
+     2.8 the same motion flips it onto its belly (checked in simulation).
+     Walkers stay far from the limits (±0.5 rad around home).
+  → `stand12_reach` (80M steps).
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -699,8 +714,8 @@ web/                    Vite + TypeScript + three.js frontend
   `walk12_straight` went straight but splayed its legs (roll). Walk /
   Stand modes with the automatic switch are built and tested. Training now,
   side by side on the GPU: `walk12_tidy` (+ roll penalty) and
-  `stand12_gated` (the stand task, 80M steps; the first stand run learned
-  to lie still). Then measure how hard a shove each survives (scratchpad
+  `stand12_reach` (the stand task, 80M steps; earlier stand runs learned to
+  lie still, then couldn't reach the floor from their back). Then measure how hard a shove each survives (scratchpad
   push_survival: 16 directions per strength) vs trot_clock_15, never
   shoved in training: 100% at 0.5 m/s, 81% at 1.0, 31% at 1.5, 12% at 2.0,
   0% from 2.5 m/s.
@@ -748,5 +763,9 @@ web/                    Vite + TypeScript + three.js frontend
     - all worlds converged; solver ~1.2–2.9 iterations.
     - For comparison, CPU training runs ~50k physics steps/s effective
       (5k env steps/s × 10 substeps).
-- M6+: switching robots at runtime (load_policy for another robot) needs the
-  server to rebuild the simulation and resend the scene.
+- **Jumping** (user asked, 2026-09-25, after the stand policy works): a
+  third behavior next to Walk and Stand, triggered by a key (J) in the
+  viewer: crouch, jump, land on its feet, return to the mode it was in.
+  Reward height/air time and a steady upright landing. Rough estimate from
+  the motors (±10 N·m, 0.32 m legs, 7.2 kg): 10–20 cm clearance. Ask the
+  user which kind (straight up / forward / on command) when starting.

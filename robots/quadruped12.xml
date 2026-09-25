@@ -74,7 +74,15 @@
         <joint axis="1 0 0" range="-0.8 0.8"/>
       </default>
       <default class="hip">
-        <joint range="-1.0 1.8"/>
+        <!--
+          Wider than quadruped.xml's -1.0..1.8, like ANYmal's far-swinging legs:
+          lying on its back, the legs must swing well past sideways to reach the
+          floor. At 1.8 the feet barely touch it (the torso lifts 1 cm); at 2.8,
+          swinging all four straight legs over flips the robot onto its belly.
+          The legs sit outside the torso's width, so they swing past it freely.
+          Walking stays far from these limits.
+        -->
+        <joint range="-2.0 2.8"/>
       </default>
       <default class="knee">
         <joint range="-2.6 0"/>

@@ -134,6 +134,10 @@ class WalkConfig:
             terminate_on_fall=False,
             fallen_start_fraction=0.5,
             push_max_speed=1.5,  # standing still, it should take harder shoves than while walking
+            # Getting up takes big leg movements: actions reach +-2 rad around
+            # the standing pose (walking: +-0.5), about each joint's full range.
+            # (stand12_gated, at +-0.5: 0 of 46 got up from their back.)
+            action_scale=2.0,
             roll_weight=0.0,  # getting up needs the roll joints freely; the pose term tidies up afterwards
         )
 
