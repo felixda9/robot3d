@@ -878,6 +878,33 @@ web/                    Vite + TypeScript + three.js frontend
     the viewer (72 and 144 N, halfway up the side, 16 directions);
     evaluations with another version count as not evaluated.
   → `stand12_push`: stand12_v3 47.6M fine-tuned 60M steps.
+- **2026-09-25: `stand12_push` result** (stand12_v3 47.6M fine-tuned 60M
+  steps with force pushes + stance reward): all four feet on the floor at
+  rest (was one 49 mm up); a 60 N upper-edge side push now rolls it at
+  35 °/s (was 143: it braces); viewer pushes at the upper edge, 8
+  directions: 40 N 8/8, 60 N 8/8, 80 N 7/8, 100 N 7/8, 150 N 2/8 (was
+  8/5/4/3/0); stillness 2.4° off home, joints still, 1.2 cm drift.
+- **2026-09-25: Jump task + steering** (user: "do jump training and start
+  building the next milestones … a new human like robot"; choices: jump on
+  command, steering first, humanoid legs + arms, child-size):
+  - Jump (`WalkConfig.jump()`, `--task jump`): 3 s episodes from standing;
+    the clock input runs once over the jump; `jump` = 50 × (torso height −
+    standing height) while all feet are up before the first landing
+    ("landed": touchdown after ≥ 3 airborne steps); `settle` after landing
+    (feet down × standing pose); `rejump` −1 per airborne step after
+    landing; orientation 1.0; ±1 rad actions; falls end it (60°/50%).
+    Behaviors: jump slot; `jump()` drives until landed + steady 0.5 s or
+    3 s; JumpCommand, StatusMessage jump_policy / jumping; J key + button.
+    `jump12` training: by 17M steps jump/settle rising, re-hops fading,
+    0 falls.
+  - Steering (`WalkConfig.steer()`, `--task steer`, task "walk"):
+    commands (forward −0.3..0.6, sideways ±0.3 m/s, turn ±1 rad/s) observed
+    (+3 inputs) and tracked (tracking and turn follow the command);
+    re-drawn every 5 s (forward 90%, sideways 30%, turn 50%, 10% all zero);
+    at zero: gait/clearance off, `still` (feet down × home pose, σ 0.1).
+    `--init` widens first layers for appended inputs. SetCommandCommand,
+    StatusMessage steerable / command_limits; viewer steering.ts (WASD/
+    arrows/QE, gamepad sticks). `steer12` training (from walk12_robust, 80M).
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -924,7 +951,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 142 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 151 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after
