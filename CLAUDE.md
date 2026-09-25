@@ -204,8 +204,8 @@ web/                    Vite + TypeScript + three.js frontend
 
 ## Current status
 
-**Milestone 2 done (2026-09-24), waiting for the user to test.** (M1 confirmed
-working by the user.)
+**Milestone 2 done and confirmed by the user (2026-09-24). Next: Milestone 3
+(manual control).**
 - Verified in headless Edge (DevTools protocol), both via Vite (5173) and the
   production build served by the backend (8000):
   - streams at 60 fps; pause/reset/play buttons work (reset while paused
@@ -218,8 +218,8 @@ working by the user.)
 - Tests: 15 passing (`uv run pytest`), `tsc` clean.
 - Deferred on purpose: keyboard shortcuts (M3), camera "follow robot" toggle
   (useful once it walks, M4).
-- Git remote: the user will create an empty GitHub repo (suggested name
-  `robot3d`) and send the link; then add `origin` and push `main`.
+- Git remote: `origin` = https://github.com/felixda9/robot3d.git, `main` pushed
+  (M1 + M2). Push after each milestone commit.
 
 ## Notes for later milestones
 
