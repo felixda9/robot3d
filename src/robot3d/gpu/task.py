@@ -293,6 +293,11 @@ class BatchedWalkTask:
         qpos[:, self.joint_qpos] += (2 * joint_noise - 1) * c.reset_joint_noise
         vel_noise = torch.rand(qvel.shape, generator=generator, device=self.device)
         qvel += (2 * vel_noise - 1) * c.reset_velocity_noise
+        if c.start_speed_max > 0:  # moving starts (WalkConfig.start_speed_max)
+            angle = 2 * torch.pi * torch.rand(n, generator=generator, device=self.device)
+            speed = c.start_speed_max * torch.rand(n, generator=generator, device=self.device)
+            qvel[:, 0] += speed * angle.cos()
+            qvel[:, 1] += speed * angle.sin()
         if c.fallen_start_fraction > 0:  # some start lying down (WalkTask.fallen_states)
             fallen = torch.rand(n, generator=generator, device=self.device) < c.fallen_start_fraction
             pick = torch.randint(len(self.fallen_qpos), (n,), generator=generator, device=self.device)

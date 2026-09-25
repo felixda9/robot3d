@@ -940,6 +940,24 @@ web/                    Vite + TypeScript + three.js frontend
   forward + turn right → 0.37, −0.42. Turning and forward come first;
   stopping/back/sideways not yet (the walk12_robust start walks forward
   regardless). Check again at 40M and 80M (scratchpad command_probe.py).
+- **2026-09-25: Higher jumps → 20 N·m motors on quadruped12** (user: "I want
+  the jump to be higher, right now it's pretty bugged and not high"):
+  - "bugged": jump12 from walking did nothing (torso +0–1 cm, 0–40 ms in
+    the air, then 3 s wasted): it had only trained from standing. From
+    standing: +13 cm, feet up to 12–14 cm, 280–300 ms airborne, ≤ 9° tilt.
+  - Height was near the motors' limit: a scripted crouch-and-extend
+    reached +16 cm with 10 N·m (policy: 13–14 cm); 15 N·m +25 cm; 20 N·m
+    +37–39 cm (damping kv made ~2 cm of difference).
+  - User chose stronger motors: quadruped12 now 20 N·m, kv 1.0 (0.5–0.7
+    left it swaying after the drop test). Existing policies with the new
+    motors (same kp, so unsaturated torques are unchanged): stand12_push
+    viewer pushes 8/8/8/7/2 of 8 at 40/60/80/100/150 N; getup12_v3 48/48
+    upside-down cases, ~1.1 s; walk12_robust shoves 100/100/100/100/93/87%
+    at 0.5…3 m/s (was …/93/81/68/56): no retraining needed. Older runs of
+    quadruped12 now replay with the stronger motors.
+  - Jump: `start_speed_max` 0.5 m/s + joint noise ±0.3 rad (running
+    starts); `jump12_m20` fine-tunes jump12 on the new motors (50M), and
+    `steer12_m20` restarts steering (steer12 was on the old motors).
 - MuJoCo Warp occasionally prints "linesearch iterations limit reached"
   (~5 times per 50M-step run, i.e. per ~500M robot-physics-steps): some
   world's contact solve stopped at ls_iterations 50, slightly less
@@ -986,7 +1004,7 @@ web/                    Vite + TypeScript + three.js frontend
   - a tiny GPU training run plays in CPU MuJoCo.
 - GPU runs v1–v5: see Decisions (GPU tuning). Transfer to CPU MuJoCo is fine;
   sample efficiency and stability are not yet at CPU level.
-- Tests: 156 passing (GPU tests skip without CUDA), `tsc` clean.
+- Tests: 157 passing (GPU tests skip without CUDA), `tsc` clean.
 - The dashboard shows a CPU/GPU pill; the throughput chart uses a log axis;
   errors show a red banner instead of blank charts.
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after

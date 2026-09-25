@@ -161,6 +161,10 @@ class WalkConfig:
     # so the policy learns to cope with slightly different starts
     reset_joint_noise: float = 0.1  # rad
     reset_velocity_noise: float = 0.1  # rad/s and m/s
+    # > 0 (m/s): standing starts also move, horizontally in a random direction
+    # at up to this speed (jump: the viewer may start a jump mid-stride;
+    # jump12, trained from standing only, didn't jump at all while walking).
+    start_speed_max: float = 0.0
 
     # --- random shoves (since 5c, for robustness): every push_interval seconds
     # (randomly 0.5x to 1.5x that), the torso gets a sudden velocity kick,
@@ -263,6 +267,10 @@ class WalkConfig:
             upright_weight=0.0,
             orientation_weight=1.0,  # stay level, in the air too
             jump_weight=50.0,  # a 10 cm high jump: ~20 over its ~0.3 s flight
+            # Running starts, as when J is pressed while walking: legs anywhere
+            # within +-0.3 rad of the standing pose, moving at up to 0.5 m/s.
+            reset_joint_noise=0.3,
+            start_speed_max=0.5,
             rejump_weight=1.0,
             settle_weight=1.0,  # can only be earned after jumping
             support_weight=0.0,  # all feet up is the point
@@ -764,6 +772,9 @@ class WalkTask:
             noise = c.reset_joint_noise
             data.qpos[self.joint_qpos] += rng.uniform(-noise, noise, self.num_actions)
             data.qvel[:] += rng.uniform(-c.reset_velocity_noise, c.reset_velocity_noise, self.model.nv)
+            if c.start_speed_max > 0:
+                angle, speed = rng.uniform(0, 2 * np.pi), rng.uniform(0, c.start_speed_max)
+                data.qvel[0:2] += speed * np.array([np.cos(angle), np.sin(angle)])
         data.ctrl[:] = self.home_ctrl
         mujoco.mj_forward(self.model, data)
 

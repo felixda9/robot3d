@@ -67,7 +67,10 @@
       <joint type="hinge" axis="0 1 0" armature="0.01" damping="0.1"/>
 
       <!-- Position actuators (a PD controller in each motor), same as quadruped.xml. -->
-      <position kp="40" kv="1.0" forcerange="-10 10" inheritrange="1"/>
+      <!-- 20 N·m motors (was 10; the user's choice 2026-09-25, for higher jumps: a scripted
+           jump went from +16 to +37 cm; Unitree Go1 has 24-35 N·m for 12 kg). Damping stays
+           kv 1.0: less (0.3-0.7) added only ~2 cm and left the robot swaying after a drop. -->
+      <position kp="40" kv="1.0" forcerange="-20 20" inheritrange="1"/>
 
       <default class="roll">
         <!-- +-0.8 rad (~46 deg) sideways, in the range of real robot dogs (Spot, ANYmal: ~0.75). -->

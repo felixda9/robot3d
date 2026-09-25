@@ -430,6 +430,12 @@ def test_jump_task():
     again = terms(jump_airborne=True, jump_landed=True, height=task.standing_height + 0.1, feet_down=np.zeros(4, bool))
     assert again["jump"] == 0.0 and again["rejump"] == -c.rejump_weight  # one jump only
     assert terms(jump_landed=True)["settle"] == pytest.approx(c.settle_weight)  # landed, standing in the home pose
+    # Running starts (jumping mid-stride): episodes begin moving.
+    speeds = []
+    for seed in range(20):
+        env.reset(seed=seed)
+        speeds.append(np.linalg.norm(env.data.qvel[:2]))
+    assert max(speeds) > 0.3 and max(speeds) < c.start_speed_max + 0.2
     assert terms()["settle"] == 0.0  # no jump, no settle reward
     assert reward_terms(WalkEnv("quadruped").task)["jump"] == 0.0  # other tasks: off
 
