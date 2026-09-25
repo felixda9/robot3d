@@ -147,5 +147,33 @@ def test_bad_messages_get_an_error_reply(client):
         assert "JSON text" in receive_until(ws, "error").message
 
 
+def test_without_a_policy(client):
+    with client.websocket_connect("/ws") as ws:
+        status = receive_until(ws, "status")
+        assert status.policy == "" and status.policy_active is False
+        ws.send_json({"type": "use_policy", "active": True})
+        assert "no policy loaded" in receive_until(ws, "error").message
+
+
+def test_policy_drives_and_can_be_switched_off(tiny_run):
+    with TestClient(create_app("quadruped", policy=tiny_run)) as client:
+        with client.websocket_connect("/ws") as ws:
+            scene = receive(ws)
+            status = receive(ws)
+            assert status.policy.startswith("tiny @ ") and status.policy_active is True
+            # Starts standing (as in training), not dropped from 0.4 m.
+            torso_z = receive_until(ws, "frame").xpos[2]
+            assert torso_z == pytest.approx(0.26, abs=0.02)
+
+            ws.send_json({"type": "set_ctrl", "ctrl": {"FL_knee": -1.0}, "duration": 0})
+            assert "policy is driving" in receive_until(ws, "error").message
+
+            ws.send_json({"type": "use_policy", "active": False})
+            assert receive_until(ws, "status").policy_active is False
+            ws.send_json({"type": "set_ctrl", "ctrl": {"FL_knee": -1.0}, "duration": 0})
+            frame = receive_until(ws, "frame", lambda f: f.ctrl[FL_KNEE] == -1.0)
+            assert len(frame.ctrl) == len(scene.actuators)
+
+
 def test_root_page_responds(client):
     assert client.get("/").status_code == 200

@@ -17,7 +17,7 @@
  *   connect -> server sends SceneMessage, StatusMessage, latest FrameMessage
  *           -> then a FrameMessage ~60 times per second while the sim runs
  *              (and whenever motor targets change)
- *   client  -> sends ClientMessage commands (play / pause / reset / set_ctrl)
+ *   client  -> sends ClientMessage commands (play / pause / reset / set_ctrl / use_policy)
  *
  * Per-motor arrays (FrameMessage.ctrl etc., KeyframeInfo.ctrl) are in
  * actuator order, the order of SceneMessage.actuators.
@@ -143,6 +143,10 @@ export interface FrameMessage {
 export interface StatusMessage {
   type: "status";
   paused: boolean;
+  /** The loaded trained policy ("<run> @ <steps> steps"), or "" if none. */
+  policy: string;
+  /** True while the policy drives the motors; set_ctrl is refused then. */
+  policy_active: boolean;
 }
 
 /** The server rejected a message from this client. */
@@ -188,4 +192,13 @@ export interface SetCtrlCommand {
   duration: number;
 }
 
-export type ClientMessage = PlayCommand | PauseCommand | ResetCommand | SetCtrlCommand;
+/**
+ * Let the loaded policy drive (true) or take over manually (false). Manual
+ * control starts from the policy's last motor targets. Error if no policy.
+ */
+export interface UsePolicyCommand {
+  type: "use_policy";
+  active: boolean;
+}
+
+export type ClientMessage = PlayCommand | PauseCommand | ResetCommand | SetCtrlCommand | UsePolicyCommand;

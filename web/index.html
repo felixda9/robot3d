@@ -18,6 +18,14 @@
         <button id="play-pause" disabled>Pause</button>
         <button id="reset" disabled>Reset</button>
       </div>
+      <label class="toggle" title="Camera moves along with the robot (F)">
+        <input type="checkbox" id="follow" checked /> Follow robot
+      </label>
+      <div id="policy-box" hidden>
+        <div class="policy-label">Policy</div>
+        <div id="policy-name" class="policy-name"></div>
+        <button id="policy-toggle" title="P">Take manual control</button>
+      </div>
       <div class="stats">
         <span id="sim-time">t = 0.00 s</span>
         <span id="stream-fps" title="frames received from the server per second">0 fps</span>

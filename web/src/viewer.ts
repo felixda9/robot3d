@@ -38,6 +38,9 @@ export class Viewer {
   private frameMeshes: (THREE.Mesh | null)[] = [];
   /** Center of the moving geoms; the sun, shadows and grid follow it. */
   private readonly focus = new THREE.Vector3();
+  /** Follow camera: where `focus` was when the camera last moved with it. */
+  private readonly followAnchor = new THREE.Vector3();
+  private following = false;
   private currentRobot: string | null = null;
 
   constructor(container: HTMLElement) {
@@ -114,6 +117,7 @@ export class Viewer {
       this.currentRobot = scene.robot;
       this.setCamera(scene.camera);
     }
+    this.followAnchor.copy(this.focus);
   }
 
   /** Move every dynamic geom to its pose in this frame. */
@@ -128,6 +132,15 @@ export class Viewer {
       this.focus.z += frame.xpos[3 * i + 2];
     }
     if (count > 0) this.focus.divideScalar(count);
+  }
+
+  /**
+   * Follow camera: the camera moves along with the robot (horizontally only,
+   * so it doesn't bob with every step); you can still orbit and zoom.
+   */
+  setFollow(on: boolean): void {
+    this.following = on;
+    this.followAnchor.copy(this.focus); // start from here, no jump
   }
 
   /** Place the camera like MuJoCo's free camera (azimuth/elevation/distance). */
@@ -149,6 +162,15 @@ export class Viewer {
   }
 
   private render(): void {
+    if (this.following) {
+      const dx = this.focus.x - this.followAnchor.x;
+      const dy = this.focus.y - this.followAnchor.y;
+      this.camera.position.x += dx;
+      this.camera.position.y += dy;
+      this.controls.target.x += dx;
+      this.controls.target.y += dy;
+      this.followAnchor.copy(this.focus);
+    }
     this.controls.update();
     // The sun (and its shadow box) and the grid follow the robot, so shadows
     // work anywhere and the ground looks endless.

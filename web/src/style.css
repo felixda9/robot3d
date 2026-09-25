@@ -50,6 +50,50 @@ body {
   min-width: 180px;
 }
 
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+#policy-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--panel-border);
+}
+
+#policy-box[hidden] {
+  display: none;
+}
+
+.policy-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.policy-name {
+  max-width: 220px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+#policy-box.active .policy-name {
+  color: var(--accent);
+}
+
 /* ------------------------------------------------------------ motor panel */
 
 #motors {

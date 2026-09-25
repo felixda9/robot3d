@@ -1,7 +1,7 @@
 import "./style.css";
 import { Connection, defaultSocketUrl } from "./connection";
 import { MotorPanel } from "./motors";
-import type { ServerMessage } from "./protocol";
+import type { ServerMessage, StatusMessage } from "./protocol";
 import { Viewer } from "./viewer";
 
 function element<T extends HTMLElement>(id: string): T {
@@ -16,6 +16,10 @@ const ui = {
   robotName: element<HTMLSpanElement>("robot-name"),
   playPause: element<HTMLButtonElement>("play-pause"),
   reset: element<HTMLButtonElement>("reset"),
+  follow: element<HTMLInputElement>("follow"),
+  policyBox: element<HTMLDivElement>("policy-box"),
+  policyName: element<HTMLDivElement>("policy-name"),
+  policyToggle: element<HTMLButtonElement>("policy-toggle"),
   simTime: element<HTMLSpanElement>("sim-time"),
   streamFps: element<HTMLSpanElement>("stream-fps"),
   motors: element<HTMLDivElement>("motors"),
@@ -26,8 +30,10 @@ const viewer = new Viewer(ui.viewport);
 const motors = new MotorPanel(ui.motors, (ctrl, duration) =>
   connection.send({ type: "set_ctrl", ctrl, duration }),
 );
-let paused = false;
+let status: StatusMessage = { type: "status", paused: false, policy: "", policy_active: false };
+let presetCount = 0;
 let framesThisSecond = 0;
+viewer.setFollow(ui.follow.checked);
 
 const connection = new Connection(defaultSocketUrl(), {
   onMessage: handleMessage,
@@ -35,7 +41,8 @@ const connection = new Connection(defaultSocketUrl(), {
     ui.dot.classList.toggle("connected", connected);
     ui.playPause.disabled = !connected;
     ui.reset.disabled = !connected;
-    motors.setEnabled(connected);
+    ui.policyToggle.disabled = !connected;
+    motors.setConnected(connected);
     if (!connected) ui.robotName.textContent = "disconnected, retrying…";
   },
 });
@@ -48,7 +55,8 @@ function handleMessage(message: ServerMessage): void {
       viewer.loadScene(message);
       motors.load(message);
       ui.robotName.textContent = message.robot;
-      updateHelp(message.keyframes.length);
+      presetCount = message.keyframes.length;
+      updateHelp();
       break;
     case "frame":
       viewer.applyFrame(message);
@@ -57,8 +65,7 @@ function handleMessage(message: ServerMessage): void {
       framesThisSecond++;
       break;
     case "status":
-      paused = message.paused;
-      ui.playPause.textContent = paused ? "Play" : "Pause";
+      applyStatus(message);
       break;
     case "error":
       console.error("server:", message.message);
@@ -72,42 +79,76 @@ function handleMessage(message: ServerMessage): void {
   }
 }
 
+function applyStatus(next: StatusMessage): void {
+  status = next;
+  ui.playPause.textContent = status.paused ? "Play" : "Pause";
+  ui.policyBox.hidden = status.policy === "";
+  ui.policyBox.classList.toggle("active", status.policy_active);
+  ui.policyName.textContent = status.policy;
+  ui.policyToggle.textContent = status.policy_active ? "Take manual control" : "Let the policy drive";
+  motors.setLocked(status.policy_active);
+  updateHelp();
+}
+
 function togglePlay(): void {
-  connection.send({ type: paused ? "play" : "pause" });
+  connection.send({ type: status.paused ? "play" : "pause" });
 }
 
 function reset(): void {
   connection.send({ type: "reset" });
 }
 
+function togglePolicy(): void {
+  if (status.policy !== "") connection.send({ type: "use_policy", active: !status.policy_active });
+}
+
+function setFollow(on: boolean): void {
+  ui.follow.checked = on;
+  viewer.setFollow(on);
+}
+
 // blur(): a focused button would also react to Space, toggling twice.
-ui.playPause.addEventListener("click", () => {
-  togglePlay();
-  ui.playPause.blur();
-});
-ui.reset.addEventListener("click", () => {
-  reset();
-  ui.reset.blur();
+for (const [button, action] of [
+  [ui.playPause, togglePlay],
+  [ui.reset, reset],
+  [ui.policyToggle, togglePolicy],
+] as const) {
+  button.addEventListener("click", () => {
+    action();
+    button.blur();
+  });
+}
+ui.follow.addEventListener("change", () => {
+  setFollow(ui.follow.checked);
+  ui.follow.blur();
 });
 
 // Keyboard shortcuts. Modifier combos (Ctrl+R etc.) stay with the browser.
 window.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.metaKey || event.altKey) return;
-  if (event.key === " ") {
+  const key = event.key.toLowerCase();
+  if (key === " ") {
     event.preventDefault(); // don't scroll or press a focused button
     if (!event.repeat) togglePlay();
-  } else if (event.key === "r" || event.key === "R") {
+  } else if (key === "r") {
     reset();
-  } else if (/^[1-9]$/.test(event.key)) {
-    motors.applyPreset(Number(event.key) - 1);
+  } else if (key === "f") {
+    setFollow(!ui.follow.checked);
+  } else if (key === "p") {
+    togglePolicy();
+  } else if (/^[1-9]$/.test(key)) {
+    motors.applyPreset(Number(key) - 1);
   }
 });
 
-function updateHelp(presets: number): void {
-  const poses = presets > 1 ? `1–${Math.min(presets, 9)}` : "1";
-  ui.help.innerHTML =
-    `<kbd>Space</kbd> play/pause · <kbd>R</kbd> reset · <kbd>${poses}</kbd> poses · ` +
-    "Mouse: left rotate, right pan, wheel zoom";
+function updateHelp(): void {
+  const parts = ["<kbd>Space</kbd> play/pause", "<kbd>R</kbd> reset", "<kbd>F</kbd> follow"];
+  if (status.policy !== "") parts.push("<kbd>P</kbd> policy/manual");
+  if (!status.policy_active && presetCount > 0) {
+    parts.push(`<kbd>${presetCount > 1 ? `1–${Math.min(presetCount, 9)}` : "1"}</kbd> poses`);
+  }
+  parts.push("Mouse: left rotate, right pan, wheel zoom");
+  ui.help.innerHTML = parts.join(" · ");
 }
 
 setInterval(() => {

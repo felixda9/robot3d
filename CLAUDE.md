@@ -67,14 +67,22 @@ MuJoCo is the physics engine; everything around it is built here.
 
 - Windows 10, NVIDIA RTX 3090 (24 GB), Python 3.12 managed with **uv**;
   Node 24 + npm for the frontend (Vite 8, TypeScript 7, three.js 0.186).
+- CPU: i7-11700K, 8 cores / 16 threads, 32 GB RAM. Training uses **CPU-only
+  PyTorch** (user's choice; pyproject pins torch to the pytorch-cpu index).
+  Stable-Baselines3 2.9, Gymnasium 1.3.
 - Commands (from the repo root unless noted):
   - `uv sync` and `cd web; npm install`: install everything
   - `uv run pytest`: all tests (physics, real-time loop, server over a real
     WebSocket, TS↔Python protocol contract; the contract test needs `web/node_modules`)
   - `uv run scripts/view_mujoco.py`: MuJoCo's built-in viewer
   - `uv run scripts/serve.py`: simulation server on http://localhost:8000
+    (`--policy runs/<name>` = a trained policy drives, newest checkpoint)
   - `cd web; npm run dev`: frontend dev server on http://localhost:5173
     (start the backend too)
+  - `uv run scripts/train.py`: PPO training (10M steps, ~30 min; `--steps`,
+    `--envs`, `--name`, `--seed`); Ctrl+C stops and still saves a checkpoint
+  - `uv run tensorboard --logdir runs`: training curves on http://localhost:6006
+  - `uv run scripts/evaluate.py runs/<name> [--all]`: headless distance/speed/falls
   - `cd web; npm run build`: type-check (`tsc`) + production build to `web/dist/`
   - `cd web; npm run typecheck`: type-check only
 
@@ -87,9 +95,14 @@ src/robot3d/
   simulation.py         Simulation: model + state + real-time pacing (shared loop)
   scene.py              MuJoCo model/state -> SceneMessage / FrameMessage
   protocol.py           Pydantic mirror of web/src/protocol.ts
-  server.py             FastAPI app: sim thread, WebSocket, static files
-scripts/                view_mujoco.py, serve.py (later: training/eval)
-tests/                  pytest
+  server.py             FastAPI app: sim thread, WebSocket, static files, --policy
+  walk.py               WalkTask/WalkConfig: observation, action, reward (shared!)
+  envs.py               WalkEnv (Gymnasium), registered as robot3d/Walk-v0
+  training.py           train(): PPO, run folders, checkpoints, TensorBoard metrics
+  policy.py             find_checkpoint(), PolicyController (plays a policy), evaluate()
+scripts/                view_mujoco.py, serve.py, train.py, evaluate.py
+tests/                  pytest (conftest.py: a tiny real training run, shared)
+runs/<name>/            training output (gitignored): run.json, tb/, checkpoints/
 web/                    Vite + TypeScript + three.js frontend
   src/protocol.ts       ALL WebSocket message types (single source of truth)
   src/connection.ts     WebSocket with auto-reconnect
@@ -112,7 +125,7 @@ web/                    Vite + TypeScript + three.js frontend
   and play/pause/reset buttons. *Success = the web view matches MuJoCo's viewer.*
 - [x] **3. Manual control:** one slider per motor in the web UI plus a few
   keyboard shortcuts. Commands go to the backend and move the robot.
-- [ ] **4. First training:** Gymnasium env for the quadruped (reward forward
+- [x] **4. First training:** Gymnasium env for the quadruped (reward forward
   velocity and staying upright; penalize energy use and falling). PPO training
   script with parallel envs, checkpoints, TensorBoard logs. Load any checkpoint
   and watch it in the web viewer.
@@ -122,6 +135,8 @@ web/                    Vite + TypeScript + three.js frontend
   motors) → generated MJCF; then a visual editor in the browser.
 - [ ] **7. Environments & commands:** terrain, stairs, obstacles. Train a policy
   that follows direction + speed commands, controllable by keyboard or gamepad.
+- [ ] **Future: GPU-parallel training on the RTX 3090** (evaluate MJX / MuJoCo
+  Playground or Isaac Lab) once the CPU-based pipeline works end to end.
 
 ## How we work
 
@@ -239,35 +254,81 @@ web/                    Vite + TypeScript + three.js frontend
   - While you drag, or for 300 ms after, frames don't overwrite that slider,
     so it doesn't jump back while your command is in flight.
   - The preset whose targets match the current ones is highlighted.
+- **2026-09-24: One walk task, shared** (`walk.py` `WalkTask`): the Gymnasium
+  env (training) and `PolicyController` (web playback, evaluate.py) use the
+  same observation / action / settings, read from the run's `run.json`, so
+  a policy sees and acts identically in both. The task is generic for our
+  robot conventions (body 1 = free torso, position motors, `home` keyframe).
+- **2026-09-24: Walk task design:**
+  - Policy acts at 50 Hz (every 10 physics steps).
+  - Action = target offsets in [−1, 1] × 0.5 rad around `home`, clipped to
+    ctrl_range; action 0 = stand still.
+  - Observation (34): torso height, gravity direction in the torso frame
+    (tilt without heading), torso linear and angular velocity in the torso
+    frame, joint angles relative to home, joint speeds, previous action.
+    It contains no x/y position or heading, so walking works the same
+    anywhere, in any direction (a test checks this).
+  - Reward per step: +1.0 × forward speed (capped at 1 m/s, so reckless
+    sprinting doesn't pay) + 0.5 × upright (torso up · world up)
+    − 0.002 × motor power (W) − 0.05 × Σ(action change)² − 10 on falling.
+  - Falling (ends the episode) = tilt > 60° or torso below half its
+    standing height. Episodes are 20 s (1000 steps).
+  - Episodes start from the *settled standing* state (simulated once at
+    init) plus noise of ±0.1 rad on joints and ±0.1 on velocities.
+- **2026-09-24: PPO setup (SB3):** SubprocVecEnv + VecNormalize (obs +
+  reward). The normalizer stats are saved with **every** checkpoint, because a
+  policy only works with the input scaling it was trained on. n_steps 1024 per
+  env, 4 minibatches, 10 epochs, lr 3e-4, γ 0.99, λ 0.95, clip 0.2, [256, 256]
+  ELU nets, log_std_init −1. Checkpoints every 500k steps + final (also on
+  Ctrl+C). Custom TensorBoard scalars: `episode/distance_m`, `speed_mps`,
+  `fell`, and `reward/<term>` (per-step mean of each reward term).
+- **2026-09-24: Parallel envs default = logical CPU threads − 2** (14 here;
+  user asked for a core-count-based default). Measured PPO throughput:
+  4 envs 2.7k, 8 envs 4.5k, 12 envs 5.1k, 16 envs 5.6k steps/s. Hyperthreads
+  help (workers are Python-overhead bound); 4 torch threads was slower than 8.
+  With 14 envs: ~5.05k steps/s, so 10M steps ≈ 33 min.
+- **2026-09-24: Policy playback:** `serve.py --policy <run|checkpoint>` →
+  `Simulation.set_controller(PolicyController)`.
+  - The controller acts every `decimation` physics steps in `Simulation.step()`.
+  - While a policy drives, reset starts from the standing state (as in
+    training), not from the keyframe drop.
+  - Status carries `policy` (label) and `policy_active`.
+  - `use_policy` toggles policy/manual. Manual starts from the policy's last
+    targets; the P key and a button do the same.
+  - `set_ctrl` is refused while the policy drives. The sliders are locked
+    but still show its targets moving live.
+- **2026-09-24: Follow camera** (checkbox + F, on by default): camera and orbit
+  target move with the robot's center, horizontally only (no bobbing).
 
 ## Current status
 
-**Milestone 3 done (2026-09-24), waiting for the user to test.**
-- Verified in headless Edge with real key and mouse events:
-  - a real mouse drag on a slider moves the joint;
-  - keys 1–4 glide between poses (the sliders animate);
-  - Space and R work;
-  - sit → tall and crouch → tall stay upright;
-  - no console errors.
-- Physics, for the user to know: dragging one hip to its limit instantly
-  (e.g. FL hip to −57°) lifts that foot far forward. The robot then stands on
-  3 legs with its center of mass outside them, and falls over. That's real
-  balance, not a bug; press R.
-- The "tall" pose sways fore-and-aft for ~3 s after arriving (nearly
-  straight legs damp the rocking weakly); it settles by itself.
-- Tests: 33 passing (`uv run pytest`), `tsc` clean.
-- Deferred: camera "follow robot" toggle (useful once it walks, M4).
+**Milestone 4 done (2026-09-24), waiting for the user to test.** (M3
+confirmed by the user.)
+- The user chose: CPU-only torch; **smoke test only** (the user runs the
+  full training themselves).
+- Smoke run (`runs/smoke`, 300k steps, 68 s, 14 envs):
+  - ep_rew_mean 65 → 639; speed −0.12 → +0.58 m/s (with exploration noise).
+  - Deterministic evaluation: the 100k/200k checkpoints stand still, the 300k
+    checkpoint goes 3.5–4 m in 20 s with no falls.
+  - The early progress came partly from the noise itself; the full 10M run
+    should form a real gait. **Not yet verified.**
+- Web verified in headless Edge: the policy walks 2.9 m in 8 s; sliders
+  are locked and move with it; P and F work; no console errors.
+- TensorBoard serves all SB3 and custom scalars.
+- Tests: 47 passing (includes a tiny real training run), `tsc` clean.
+- If the full run learns a poor gait (e.g. shuffling, hopping), tune the
+  reward in `WalkConfig` (e.g. smoothness/energy weights, speed cap).
 - Git remote: `origin` = https://github.com/felixda9/robot3d.git. Push after
   each milestone commit.
 
 ## Notes for later milestones
 
-- M4: Stable-Baselines3 PPO with small MLP policies usually trains *faster on CPU*
-  than GPU; the bottleneck is stepping many envs in parallel. Benchmark both.
-- M4: On Windows, `SubprocVecEnv` uses the `spawn` start method, so training
-  scripts need an `if __name__ == "__main__":` guard.
-- M4: To use CUDA, PyTorch has to come from the CUDA wheel index (configure it
-  in `pyproject.toml` under `[tool.uv.sources]`).
-- M4: The policy should output target *offsets* around the `home` keyframe's
-  ctrl (read from the model), clipped to ctrl_range. Policy playback in the
-  web viewer must disable or override the manual sliders (decide how then).
+- M5: runs/<name>/run.json has the settings plus progress (`finished`,
+  `steps_done`, `interrupted`, `final_checkpoint`).
+  `policy.list_checkpoints()` exists. TensorBoard event files can be read
+  with `tensorboard.backend.event_processing.event_accumulator` for the
+  dashboard's curves. Switching policies at runtime needs a new command
+  (the server only loads `--policy` at startup today).
+- Future GPU milestone: SB3 + CPU MuJoCo won't use the 3090. MJX / MuJoCo
+  Playground (JAX, thousands of envs on the GPU) is the natural next step
+  for this MJCF-based stack; Isaac Lab would mean converting robots to USD.

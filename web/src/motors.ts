@@ -46,9 +46,13 @@ export class MotorPanel {
   private readonly list: HTMLElement;
   private readonly presetBar: HTMLElement;
   private readonly setCtrl: SetCtrl;
+  private readonly hint: HTMLElement;
   private rows: MotorRow[] = [];
   private keyframes: KeyframeInfo[] = [];
   private presetButtons: HTMLButtonElement[] = [];
+  private connected = false;
+  /** True while a policy drives the motors: the panel only shows, it doesn't control. */
+  private locked = false;
 
   constructor(root: HTMLElement, setCtrl: SetCtrl) {
     this.setCtrl = setCtrl;
@@ -63,6 +67,7 @@ export class MotorPanel {
       </div>`;
     this.presetBar = root.querySelector(".presets")!;
     this.list = root.querySelector(".motor-list")!;
+    this.hint = root.querySelector(".hint")!;
     window.addEventListener("pointerup", () => this.endDrags());
     window.addEventListener("pointercancel", () => this.endDrags());
   }
@@ -87,19 +92,33 @@ export class MotorPanel {
       return button;
     });
     this.presetBar.replaceChildren(...this.presetButtons);
+    this.applyEnabled();
   }
 
   /** Send all motor targets of pose preset `index`; false if there is none. */
   applyPreset(index: number): boolean {
     const keyframe = this.keyframes[index];
-    if (keyframe === undefined) return false;
+    if (keyframe === undefined || this.locked) return false;
     const ctrl: Record<string, number> = {};
     this.rows.forEach((row, i) => (ctrl[row.actuator.name] = keyframe.ctrl[i]));
     this.setCtrl(ctrl, PRESET_DURATION);
     return true;
   }
 
-  setEnabled(enabled: boolean): void {
+  setConnected(connected: boolean): void {
+    this.connected = connected;
+    this.applyEnabled();
+  }
+
+  /** While a policy drives, the sliders show its targets but can't be moved. */
+  setLocked(locked: boolean): void {
+    this.locked = locked;
+    this.hint.textContent = locked ? "driven by the policy" : "target angle";
+    this.applyEnabled();
+  }
+
+  private applyEnabled(): void {
+    const enabled = this.connected && !this.locked;
     for (const row of this.rows) row.slider.disabled = !enabled;
     for (const button of this.presetButtons) button.disabled = !enabled;
   }

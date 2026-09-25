@@ -39,6 +39,7 @@ from robot3d.protocol import (
     ResetCommand,
     SetCtrlCommand,
     StatusMessage,
+    UsePolicyCommand,
     client_message_adapter,
 )
 from robot3d.scene import SceneEncoder
@@ -56,8 +57,9 @@ PublishFn = Callable[[str, bool], None]
 class SimRunner:
     """Owns the Simulation and advances it on a dedicated thread."""
 
-    def __init__(self, sim: Simulation, fps: int = FPS):
+    def __init__(self, sim: Simulation, fps: int = FPS, policy_label: str = ""):
         self.sim = sim
+        self.policy_label = policy_label
         self.frame_dt = 1.0 / fps
         self._encoder = SceneEncoder(sim.model, sim.robot)
         # Plain str attributes: reading them from another thread is safe, since
@@ -87,10 +89,10 @@ class SimRunner:
         last_time = self.sim.data.time
         while not self._stop.is_set():
             try:
-                was_paused = self.sim.paused
+                status_before = self.status_json
                 state_changed = self._apply_commands()
-                if self.sim.paused != was_paused:
-                    self.status_json = self._status_json()
+                self.status_json = self._status_json()
+                if self.status_json != status_before:
                     publish(self.status_json, False)
                 self.sim.advance()
                 # Only send a frame if something changed: time moved on, or a
@@ -121,24 +123,36 @@ class SimRunner:
                 command = self._commands.get_nowait()
             except queue.Empty:
                 break
-            match command:
-                case PlayCommand():
-                    self.sim.play()
-                case PauseCommand():
-                    self.sim.pause()
-                case ResetCommand():
-                    self.sim.reset()
-                    state_changed = True
-                case SetCtrlCommand(ctrl=targets, duration=duration):
-                    self.sim.set_ctrl(targets, duration)
-                    state_changed = True
+            try:
+                match command:
+                    case PlayCommand():
+                        self.sim.play()
+                    case PauseCommand():
+                        self.sim.pause()
+                    case ResetCommand():
+                        self.sim.reset()
+                        state_changed = True
+                    case SetCtrlCommand(ctrl=targets, duration=duration):
+                        self.sim.set_ctrl(targets, duration)
+                        state_changed = True
+                    case UsePolicyCommand(active=active):
+                        self.sim.use_controller(active)
+                        state_changed = True
+            except (ValueError, RuntimeError) as e:
+                # Checked on the event loop already; this only catches races,
+                # e.g. a slider command queued just after "let the policy drive".
+                log.warning("ignored %s command: %s", command.type, e)
         return state_changed
 
     def _frame_json(self) -> str:
         return self._encoder.frame(self.sim.data).model_dump_json()
 
     def _status_json(self) -> str:
-        return StatusMessage(paused=self.sim.paused).model_dump_json()
+        return StatusMessage(
+            paused=self.sim.paused,
+            policy=self.policy_label,
+            policy_active=self.sim.controller_active,
+        ).model_dump_json()
 
 
 class Client:
@@ -176,8 +190,37 @@ class Client:
             pass  # connection closed; the receive loop cleans up
 
 
-def create_app(robot: str = "quadruped", keyframe: str = "home") -> FastAPI:
-    runner = SimRunner(Simulation(robot, keyframe))
+def _refusal(command: ClientMessage, sim: Simulation) -> str | None:
+    """Why a well-formed command can't be applied, or None. Checked on the
+    event loop, where we can still answer the sender (the sim thread doesn't
+    know who sent a command)."""
+    match command:
+        case SetCtrlCommand():
+            if sim.controller_active:
+                return "a policy is driving the motors; switch to manual control first"
+            unknown = sorted(set(command.ctrl) - set(sim.actuator_names))
+            if unknown:
+                return f"unknown actuator(s): {', '.join(unknown)}"
+        case UsePolicyCommand(active=True) if sim.controller is None:
+            return "no policy loaded (start the server with --policy <run folder or checkpoint>)"
+    return None
+
+
+def create_app(robot: str = "quadruped", keyframe: str = "home", policy: str | Path | None = None) -> FastAPI:
+    """`policy`: a run folder (-> newest checkpoint) or checkpoint .zip to drive the robot."""
+    sim = Simulation(robot, keyframe)
+    policy_label = ""
+    if policy is not None:
+        # Imported here: loading PyTorch takes a moment and isn't needed otherwise.
+        from robot3d.policy import PolicyController, find_checkpoint
+
+        checkpoint = find_checkpoint(policy)
+        trained_on = checkpoint.run_info()["robot"]
+        if trained_on != robot:
+            raise ValueError(f"{checkpoint.label} was trained on robot {trained_on!r}, not {robot!r}")
+        sim.set_controller(PolicyController(checkpoint, sim.model))
+        policy_label = checkpoint.label
+    runner = SimRunner(sim, policy_label=policy_label)
     clients: set[Client] = set()  # only touched on the event loop thread
 
     def broadcast(text: str, is_frame: bool) -> None:
@@ -229,14 +272,10 @@ def create_app(robot: str = "quadruped", keyframe: str = "home") -> FastAPI:
                     detail = f"{error['msg']} at {'.'.join(map(str, error['loc'])) or 'top level'}"
                     client.send_message(ErrorMessage(message=f"invalid message: {detail}").model_dump_json())
                     continue
-                # Check motor names here, where we can still answer this client
-                # (the sim thread doesn't know who sent a command).
-                if isinstance(command, SetCtrlCommand):
-                    unknown = sorted(set(command.ctrl) - set(runner.sim.actuator_names))
-                    if unknown:
-                        message = f"unknown actuator(s): {', '.join(unknown)}"
-                        client.send_message(ErrorMessage(message=message).model_dump_json())
-                        continue
+                problem = _refusal(command, runner.sim)
+                if problem is not None:
+                    client.send_message(ErrorMessage(message=problem).model_dump_json())
+                    continue
                 runner.submit(command)
         finally:
             clients.discard(client)

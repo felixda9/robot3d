@@ -6,11 +6,24 @@ same way.
 
 import time
 from collections.abc import Mapping
+from typing import Protocol
 
 import mujoco
 import numpy as np
 
 from robot3d.robots import load_model, reset_to_keyframe
+
+
+class Controller(Protocol):
+    """Something that drives the motors, e.g. a trained policy (policy.py)."""
+
+    decimation: int  # act every this many physics steps
+
+    def reset(self) -> None: ...  # forget any memory (e.g. the previous action)
+
+    def reset_state(self, data: mujoco.MjData) -> None: ...  # start state it expects (e.g. standing)
+
+    def act(self, data: mujoco.MjData) -> None: ...  # sets data.ctrl
 
 
 class Simulation:
@@ -37,7 +50,28 @@ class Simulation:
         self._glide_to = np.zeros(nu)
         self._glide_start = np.zeros(nu)
         self._glide_duration = np.zeros(nu)
+        # An optional controller (policy) that sets the motor targets itself.
+        self.controller: Controller | None = None
+        self.controller_active = False
+        self._physics_steps = 0  # since reset; decides when the controller acts
         self.reset()
+
+    def set_controller(self, controller: Controller | None, active: bool = True) -> None:
+        self.controller = controller
+        self.use_controller(active and controller is not None)
+        if self.controller_active:
+            self.reset()  # start the way the controller expects
+
+    def use_controller(self, active: bool) -> None:
+        """Hand the motors to the controller (True) or back to manual targets (False).
+        Switching to manual keeps the controller's last targets."""
+        if active and self.controller is None:
+            raise ValueError("no controller loaded")
+        self.controller_active = active
+        if active:
+            self._glide_duration[:] = 0.0
+            self.controller.reset()
+            self._physics_steps = 0
 
     def set_ctrl(self, targets: Mapping[str, float], duration: float = 0.0) -> None:
         """Set motor targets by actuator name, clamped to each motor's range.
@@ -53,6 +87,8 @@ class Simulation:
         poses makes some joints finish long before others, and the lopsided
         poses in between can tip the robot over (e.g. sit -> tall).
         """
+        if self.controller_active:
+            raise RuntimeError("a controller (policy) is driving the motors; switch to manual first")
         for name, value in targets.items():
             i = self.actuator_names.index(name)  # ValueError for unknown names
             if self.model.actuator_ctrllimited[i]:
@@ -72,9 +108,17 @@ class Simulation:
             mujoco.mj_forward(self.model, self.data)
 
     def reset(self) -> None:
-        """Back to the start keyframe. Keeps the paused/playing state."""
+        """Back to the start: the start keyframe, or, while a controller
+        drives, the state it expects (a policy: standing, as in training).
+        Keeps the paused/playing state."""
         self._glide_duration[:] = 0.0
-        reset_to_keyframe(self.model, self.data, self.keyframe)
+        if self.controller_active:
+            self.controller.reset_state(self.data)
+        else:
+            reset_to_keyframe(self.model, self.data, self.keyframe)
+        self._physics_steps = 0
+        if self.controller is not None:
+            self.controller.reset()
         self._resync()
 
     def pause(self) -> None:
@@ -86,9 +130,13 @@ class Simulation:
             self._resync()  # don't try to "catch up" on the time spent paused
 
     def step(self) -> None:
-        """One physics step (2 ms), with motor-target glides applied first."""
+        """One physics step (2 ms). First the controller (if active, every
+        `decimation` steps) or the motor-target glides update data.ctrl."""
+        if self.controller_active and self._physics_steps % self.controller.decimation == 0:
+            self.controller.act(self.data)
         self._update_glides()
         mujoco.mj_step(self.model, self.data)
+        self._physics_steps += 1
 
     def advance(self, now: float | None = None) -> int:
         """Step the physics until sim time catches up with the wall clock.

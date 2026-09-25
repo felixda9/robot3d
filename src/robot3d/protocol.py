@@ -87,6 +87,8 @@ class FrameMessage(_Message):
 class StatusMessage(_Message):
     type: Literal["status"] = "status"
     paused: bool
+    policy: str
+    policy_active: bool
 
 
 class ErrorMessage(_Message):
@@ -124,8 +126,13 @@ class SetCtrlCommand(_Message):
     duration: Annotated[FiniteFloat, Field(ge=0.0, le=10.0)]
 
 
+class UsePolicyCommand(_Message):
+    type: Literal["use_policy"] = "use_policy"
+    active: bool
+
+
 ClientMessage = Annotated[
-    PlayCommand | PauseCommand | ResetCommand | SetCtrlCommand,
+    PlayCommand | PauseCommand | ResetCommand | SetCtrlCommand | UsePolicyCommand,
     Field(discriminator="type"),
 ]
 
