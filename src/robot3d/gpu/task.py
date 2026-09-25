@@ -195,7 +195,7 @@ class BatchedWalkTask:
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * ((action - last_action) ** 2).sum(dim=1),
             "slip": -c.slip_weight * foot_slip,
-            "support": -c.support_weight * balanced * (feet_down.sum(dim=1) < 2).float(),
+            "support": -c.support_weight * balanced * (feet_down.sum(dim=1) < self.task.min_feet_down).float(),
             "fall": -c.fall_penalty * fell.float() * float(c.terminate_on_fall),
             "height": c.height_weight * (height / self.standing_height).clamp(0.0, 1.0),
             "pose": c.pose_weight * upright * calm * is_up * torch.exp(-(joint_offset**2).sum(dim=1) / c.pose_sigma),

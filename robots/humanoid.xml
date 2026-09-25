@@ -1,0 +1,223 @@
+<!--
+  humanoid.xml: a child-size human-like robot (~1.0 m, ~19 kg), 21 motors,
+  in the spirit of Booster T1 / a small Unitree, built from primitive shapes.
+
+    legs (6 motors each): hip yaw, hip roll, hip pitch, knee, ankle pitch, ankle roll
+    waist (3): yaw, roll, pitch (the upper body twists, leans sideways, bends forward)
+    arms (3 each): shoulder pitch, shoulder roll, elbow
+
+  Conventions (shared by the whole project, see CLAUDE.md):
+    * SI units: meters, kilograms, seconds, radians. World: +x forward, +y left, +z up.
+    * Body 1 (the pelvis) is the free-floating root; the task code reads it.
+    * Joint angle 0 = standing straight with arms hanging. The "home" keyframe
+      is the standing pose (knees a little bent, feet flat).
+    * Feet are geoms named "<side>_foot" (boxes here), sides L and R.
+  Signs (right-hand rule): pitch joints about +y, positive = the segment swings
+  BACKWARD (knee bends positive; hip flexion, leg forward, is negative); roll
+  joints about +x, positive = toward the robot's LEFT; yaw about +z, positive
+  = counterclockwise seen from above.
+
+  Kinematic tree:
+    world
+     └─ pelvis                 free joint
+         ├─ L_thigh            L_hip_yaw, L_hip_roll, L_hip_pitch (three hinges at the hip)
+         │   └─ L_shin         L_knee
+         │       └─ L_foot     L_ankle_pitch, L_ankle_roll
+         ├─ R_thigh ...
+         └─ torso              waist_yaw, waist_roll, waist_pitch
+             ├─ L_upper_arm    L_shoulder_pitch, L_shoulder_roll
+             │   └─ L_forearm  L_elbow
+             └─ R_upper_arm ...
+-->
+<mujoco model="humanoid">
+  <compiler angle="radian" autolimits="true"/>
+
+  <!-- Same physics options as the quadrupeds (see quadruped.xml for why). -->
+  <option timestep="0.002" integrator="implicitfast" cone="elliptic" impratio="100"/>
+
+  <statistic center="0 0 0.5" extent="1.4"/>
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="135" elevation="-15"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="grid" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+             markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="grid" texture="grid" texrepeat="5 5" texuniform="true" reflectance="0.2"/>
+  </asset>
+
+  <default>
+    <default class="robot">
+      <!--
+        Collisions: everything hits the floor (contype/conaffinity 1/1). Body
+        parts don't hit each other (contype 2 & conaffinity 1 against 2 & 1 is
+        0), except the lower legs and feet (class "leg", contype 6, conaffinity
+        4): they hit each other (6 & 4), so feet can't pass through each
+        other. MuJoCo never collides a body with its parent.
+      -->
+      <geom contype="2" conaffinity="1" condim="3" friction="1.0 0.005 0.0001" rgba="0.25 0.35 0.55 1"/>
+      <joint type="hinge" armature="0.02" damping="0.5"/>
+
+      <!-- Position motors, strongest where the weight is carried. -->
+      <default class="hip_knee">
+        <joint axis="0 1 0"/>
+        <position kp="150" kv="4" forcerange="-80 80" inheritrange="1"/>
+      </default>
+      <default class="hip_side">
+        <position kp="100" kv="3" forcerange="-50 50" inheritrange="1"/>
+      </default>
+      <default class="ankle">
+        <position kp="80" kv="2" forcerange="-40 40" inheritrange="1"/>
+      </default>
+      <default class="waist">
+        <position kp="100" kv="3" forcerange="-40 40" inheritrange="1"/>
+      </default>
+      <default class="arm">
+        <joint armature="0.01" damping="0.3"/>
+        <position kp="30" kv="1" forcerange="-15 15" inheritrange="1"/>
+      </default>
+
+      <default class="leg">
+        <geom contype="6" conaffinity="4" rgba="0.9 0.55 0.2 1"/>
+      </default>
+      <default class="limb">
+        <geom rgba="0.85 0.85 0.85 1"/>
+      </default>
+      <default class="foot">
+        <geom type="box" size="0.09 0.045 0.02" pos="0.025 0 -0.035" mass="0.5" contype="6" conaffinity="5"
+              rgba="0.15 0.15 0.15 1"/>
+      </default>
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="sun" pos="0 0 3" dir="0 0 -1" directional="true" castshadow="true"/>
+    <geom name="floor" type="plane" size="0 0 0.05" material="grid"/>
+
+    <body name="pelvis" pos="0 0 0.6" childclass="robot">
+      <freejoint name="root"/>
+      <camera name="track" mode="trackcom" pos="0.9 -2.2 0.6" xyaxes="0.93 0.37 0  -0.08 0.2 0.98"/>
+      <geom name="pelvis" type="box" size="0.06 0.1 0.05" mass="3"/>
+
+      <!-- Left leg: hip joint 7 cm to the side, 5 cm below the pelvis center. -->
+      <body name="L_thigh" pos="0 0.07 -0.05">
+        <joint name="L_hip_yaw" class="hip_side" axis="0 0 1" range="-0.6 0.6"/>
+        <joint name="L_hip_roll" class="hip_side" axis="1 0 0" range="-0.35 0.7"/>
+        <joint name="L_hip_pitch" class="hip_knee" range="-1.8 0.6"/>
+        <geom name="L_thigh" class="leg" type="capsule" size="0.045" fromto="0 0 0  0 0 -0.22" mass="1.8"/>
+        <body name="L_shin" pos="0 0 -0.22">
+          <joint name="L_knee" class="hip_knee" range="0 2.3"/>
+          <geom name="L_shin" class="leg" type="capsule" size="0.035" fromto="0 0 0  0 0 -0.22" mass="1.1"/>
+          <body name="L_foot" pos="0 0 -0.22">
+            <joint name="L_ankle_pitch" class="ankle" axis="0 1 0" range="-0.7 0.7"/>
+            <joint name="L_ankle_roll" class="ankle" axis="1 0 0" range="-0.35 0.35"/>
+            <geom name="L_foot" class="foot"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- Right leg: mirrored (roll ranges flipped: outward is negative on the right). -->
+      <body name="R_thigh" pos="0 -0.07 -0.05">
+        <joint name="R_hip_yaw" class="hip_side" axis="0 0 1" range="-0.6 0.6"/>
+        <joint name="R_hip_roll" class="hip_side" axis="1 0 0" range="-0.7 0.35"/>
+        <joint name="R_hip_pitch" class="hip_knee" range="-1.8 0.6"/>
+        <geom name="R_thigh" class="leg" type="capsule" size="0.045" fromto="0 0 0  0 0 -0.22" mass="1.8"/>
+        <body name="R_shin" pos="0 0 -0.22">
+          <joint name="R_knee" class="hip_knee" range="0 2.3"/>
+          <geom name="R_shin" class="leg" type="capsule" size="0.035" fromto="0 0 0  0 0 -0.22" mass="1.1"/>
+          <body name="R_foot" pos="0 0 -0.22">
+            <joint name="R_ankle_pitch" class="ankle" axis="0 1 0" range="-0.7 0.7"/>
+            <joint name="R_ankle_roll" class="ankle" axis="1 0 0" range="-0.35 0.35"/>
+            <geom name="R_foot" class="foot"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- Upper body: twists, leans sideways and bends at the waist. -->
+      <body name="torso" pos="0 0 0.05">
+        <joint name="waist_yaw" class="waist" axis="0 0 1" range="-1.0 1.0"/>
+        <joint name="waist_roll" class="waist" axis="1 0 0" range="-0.5 0.5"/>
+        <!-- about +y on an upright segment: positive bends the torso FORWARD -->
+        <joint name="waist_pitch" class="waist" axis="0 1 0" range="-0.4 0.8"/>
+        <geom name="torso" type="box" size="0.06 0.11 0.13" pos="0 0 0.14" mass="6"/>
+        <geom name="head" type="sphere" size="0.07" pos="0 0 0.35" mass="1" rgba="0.95 0.95 0.95 1"/>
+        <!-- A dark visor marks the face (+x). -->
+        <geom name="visor" type="box" size="0.012 0.05 0.018" pos="0.064 0 0.36" mass="0.01" rgba="0.1 0.1 0.12 1"/>
+
+        <body name="L_upper_arm" pos="0 0.145 0.24">
+          <joint name="L_shoulder_pitch" class="arm" axis="0 1 0" range="-2.8 1.0"/>
+          <joint name="L_shoulder_roll" class="arm" axis="1 0 0" range="-0.3 2.5"/>
+          <geom name="L_upper_arm" class="limb" type="capsule" size="0.03" fromto="0 0 0  0 0 -0.17" mass="0.6"/>
+          <body name="L_forearm" pos="0 0 -0.18">
+            <joint name="L_elbow" class="arm" axis="0 1 0" range="-2.4 0"/>
+            <geom name="L_forearm" class="limb" type="capsule" size="0.025" fromto="0 0 0  0 0 -0.16" mass="0.4"/>
+            <geom name="L_hand" type="sphere" size="0.035" pos="0 0 -0.19" mass="0.1" rgba="0.15 0.15 0.15 1"/>
+          </body>
+        </body>
+
+        <body name="R_upper_arm" pos="0 -0.145 0.24">
+          <joint name="R_shoulder_pitch" class="arm" axis="0 1 0" range="-2.8 1.0"/>
+          <joint name="R_shoulder_roll" class="arm" axis="1 0 0" range="-2.5 0.3"/>
+          <geom name="R_upper_arm" class="limb" type="capsule" size="0.03" fromto="0 0 0  0 0 -0.17" mass="0.6"/>
+          <body name="R_forearm" pos="0 0 -0.18">
+            <joint name="R_elbow" class="arm" axis="0 1 0" range="-2.4 0"/>
+            <geom name="R_forearm" class="limb" type="capsule" size="0.025" fromto="0 0 0  0 0 -0.16" mass="0.4"/>
+            <geom name="R_hand" type="sphere" size="0.035" pos="0 0 -0.19" mass="0.1" rgba="0.15 0.15 0.15 1"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- One motor per joint, in tree order. Order here = order of data.ctrl. -->
+  <actuator>
+    <position name="L_hip_yaw" joint="L_hip_yaw" class="hip_side"/>
+    <position name="L_hip_roll" joint="L_hip_roll" class="hip_side"/>
+    <position name="L_hip_pitch" joint="L_hip_pitch" class="hip_knee"/>
+    <position name="L_knee" joint="L_knee" class="hip_knee"/>
+    <position name="L_ankle_pitch" joint="L_ankle_pitch" class="ankle"/>
+    <position name="L_ankle_roll" joint="L_ankle_roll" class="ankle"/>
+    <position name="R_hip_yaw" joint="R_hip_yaw" class="hip_side"/>
+    <position name="R_hip_roll" joint="R_hip_roll" class="hip_side"/>
+    <position name="R_hip_pitch" joint="R_hip_pitch" class="hip_knee"/>
+    <position name="R_knee" joint="R_knee" class="hip_knee"/>
+    <position name="R_ankle_pitch" joint="R_ankle_pitch" class="ankle"/>
+    <position name="R_ankle_roll" joint="R_ankle_roll" class="ankle"/>
+    <position name="waist_yaw" joint="waist_yaw" class="waist"/>
+    <position name="waist_roll" joint="waist_roll" class="waist"/>
+    <position name="waist_pitch" joint="waist_pitch" class="waist"/>
+    <position name="L_shoulder_pitch" joint="L_shoulder_pitch" class="arm"/>
+    <position name="L_shoulder_roll" joint="L_shoulder_roll" class="arm"/>
+    <position name="L_elbow" joint="L_elbow" class="arm"/>
+    <position name="R_shoulder_pitch" joint="R_shoulder_pitch" class="arm"/>
+    <position name="R_shoulder_roll" joint="R_shoulder_roll" class="arm"/>
+    <position name="R_elbow" joint="R_elbow" class="arm"/>
+  </actuator>
+
+  <keyframe>
+    <!--
+      "home": standing, knees a little bent (hip -0.25, knee 0.5, ankle -0.25:
+      the pitch angles add up to 0, so the feet stay flat), arms hanging
+      slightly out, elbows a little bent. Dropped from 0.6 m.
+      qpos: pelvis xyz, quaternion (w x y z), then the joints in tree order
+      (left leg, right leg, waist yaw/roll/pitch, left arm, right arm) = the motor order.
+    -->
+    <key name="home"
+         qpos="0 0 0.6  1 0 0 0
+               0 0 -0.25 0.5 -0.25 0   0 0 -0.25 0.5 -0.25 0
+               0 0 0
+               0 0.1 -0.3   0 -0.1 -0.3"
+         ctrl="0 0 -0.25 0.5 -0.25 0   0 0 -0.25 0.5 -0.25 0
+               0 0 0
+               0 0.1 -0.3   0 -0.1 -0.3"/>
+    <!-- Pose presets (the web UI's pose buttons apply only ctrl). -->
+    <key name="crouch"
+         ctrl="0 0 -0.7 1.4 -0.7 0   0 0 -0.7 1.4 -0.7 0   0 0 0.3   -0.4 0.1 -0.6   -0.4 -0.1 -0.6"/>
+    <key name="arms_out"
+         ctrl="0 0 -0.25 0.5 -0.25 0   0 0 -0.25 0.5 -0.25 0   0 0 0   0 1.5 0   0 -1.5 0"/>
+  </keyframe>
+</mujoco>

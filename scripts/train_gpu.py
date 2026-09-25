@@ -59,6 +59,7 @@ def main() -> None:
     overrides = {k: v for k, v in (("epochs", args.epochs), ("minibatches", args.minibatches)) if v is not None}
     walk = {"walk": WalkConfig, "steer": WalkConfig.steer, "stand": WalkConfig.stand, "getup": WalkConfig.getup,
             "jump": WalkConfig.jump}[args.task]()
+    walk = walk.for_robot(args.robot)  # e.g. the humanoid's own settings (walk.ROBOT_SETTINGS)
     if args.gait_hz is not None:
         walk = dataclasses.replace(walk, gait_frequency=args.gait_hz)
     common = dict(robot=args.robot, total_steps=int(args.steps), name=name, seed=args.seed,

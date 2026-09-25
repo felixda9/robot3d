@@ -204,6 +204,14 @@ class WalkConfig:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    def for_robot(self, robot: str) -> "WalkConfig":
+        """These settings adjusted for a robot (ROBOT_SETTINGS), e.g. the
+        humanoid: a biped needs its hip/ankle roll joints to balance, so no
+        roll penalty, and it counts as fallen sooner than a quadruped."""
+        from dataclasses import replace
+
+        return replace(self, **ROBOT_SETTINGS.get(robot, {}).get(self.task, {}))
+
     @classmethod
     def stand(cls) -> "WalkConfig":
         """The stand task: stand still in the home pose; when shoved, catch
@@ -358,6 +366,21 @@ class WalkConfig:
         return cls(**{**before_it_existed, **saved})
 
 
+# Per robot and task: settings that differ from the defaults (WalkConfig.for_robot).
+ROBOT_SETTINGS: dict[str, dict[str, dict]] = {
+    "humanoid": {
+        "walk": dict(
+            roll_weight=0.0,  # hip and ankle roll shift the weight between the feet: needed
+            swing_height=0.05,
+            min_up_z=0.5,  # a biped is down by 60 deg of tilt ...
+            min_height_fraction=0.6,  # ... or with its pelvis below 60% of standing height (kneeling)
+            push_max_speed=0.5,  # gentler shoves to start (a 19 kg biped), growing to 1.5 m/s
+            push_curriculum_max=1.5,
+        ),
+    },
+}
+
+
 class WalkTask:
     """Model-specific constants plus the task's observation, action, and reward."""
 
@@ -392,7 +415,12 @@ class WalkTask:
         # penalty. A foot counts as on the ground when its lowest point is
         # within FOOT_CONTACT_MARGIN of the floor (spheres: center z - radius).
         self.feet = np.array([g for g in range(model.ngeom) if model.geom(g).name.endswith("_foot")], dtype=int)
-        self.foot_radius = model.geom_size[self.feet, 0]
+        # From a foot geom's center down to its sole: the radius of a sphere
+        # foot (quadrupeds), the half-height of a box foot (the humanoid).
+        is_box = model.geom_type[self.feet] == mujoco.mjtGeom.mjGEOM_BOX
+        self.foot_radius = np.where(is_box, model.geom_size[self.feet, 2], model.geom_size[self.feet, 0])
+        # "support": at least half the feet should be down (quadruped 2, biped 1).
+        self.min_feet_down = max(1, len(self.feet) // 2)
         # Diagonal leg pairs (indices into self.feet) for the trot reward:
         # front-left with rear-right, front-right with rear-left.
         foot_index = {model.geom(g).name.removesuffix("_foot"): i for i, g in enumerate(self.feet)}
@@ -404,13 +432,17 @@ class WalkTask:
         self.foot_phase_offset = np.zeros(len(self.feet))
         if len(self.diagonal_pairs) == 2:
             self.foot_phase_offset[list(self.diagonal_pairs[1])] = 0.5
+        elif "R" in foot_index:  # a biped: left and right take turns
+            self.foot_phase_offset[foot_index["R"]] = 0.5
 
         self.standing_qpos, self.standing_qvel = self._settled_standing_state(keyframe)
         self.standing_height = float(self.standing_qpos[2])
         self.robot_mass = float(model.body_subtreemass[1])
-        # The torso's half-size (the box geom named "torso"), where pushes land.
-        torso_geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "torso")
-        self.torso_half_size = model.geom_size[torso_geom].copy() if torso_geom >= 0 else np.array([0.1, 0.1, 0.05])
+        # Pushes land on the root body (1) at its first geom: the quadrupeds'
+        # torso box, the humanoid's pelvis box. Its half-size:
+        root_geom = model.body_geomadr[1]
+        self.torso_half_size = (model.geom_size[root_geom].copy()
+                                if model.geom_type[root_geom] == mujoco.mjtGeom.mjGEOM_BOX else np.array([0.1, 0.1, 0.05]))
         joints = model.actuator_trnid[:, 0]
         self.joint_range = model.jnt_range[joints].copy()  # (motors, 2) min/max angle
         # Sideways (roll) motors, by the naming convention "<leg>_roll" (quadruped12).
@@ -599,7 +631,7 @@ class WalkTask:
             "energy": -c.energy_weight * motor_power,
             "smoothness": -c.smoothness_weight * float(np.sum((action - last_action) ** 2)),
             "slip": -c.slip_weight * foot_slip,
-            "support": -c.support_weight * balanced * float(np.sum(feet_down) < 2),
+            "support": -c.support_weight * balanced * float(np.sum(feet_down) < self.min_feet_down),
             "fall": -c.fall_penalty if fell and c.terminate_on_fall else 0.0,
             "height": c.height_weight * min(max(height / self.standing_height, 0.0), 1.0),
             "pose": c.pose_weight * upright * calm * is_up * math.exp(-float(np.sum(joint_offset**2)) / c.pose_sigma),
@@ -751,7 +783,7 @@ class WalkTask:
         for _ in range(self.FALLEN_STATES):
             mujoco.mj_resetData(model, data)
             data.qpos[:] = self.standing_qpos
-            data.qpos[2] = 0.5
+            data.qpos[2] = max(0.5, 1.5 * self.standing_height)  # high enough for any orientation (humanoid: 0.8 m)
             orientation = rng.normal(size=4)  # a uniformly random rotation (normalized 4D Gaussian)
             data.qpos[3:7] = orientation / np.linalg.norm(orientation)
             angles = rng.uniform(low, high)
